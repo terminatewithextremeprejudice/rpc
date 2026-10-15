@@ -1,8 +1,8 @@
-##  rpc
+#  RPC in Node.JS
 
 A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and binary encoding - simple, direct and brutally basic.
 
-### Why on earth would anyone use something like this when gRPC exists?
+## Why on earth would anyone use something like this when gRPC exists?
 
 ** Simplicity is sometimes a virtue worth paying for. **
 
