@@ -1,5 +1,16 @@
 import { describe, expect, test } from '@jest/globals';
-import { encode, decode, encodeCall, decodeCall, RpcConstants, type XDRHeader } from '../src/shared/xdr';
+import { 
+  encode, 
+  decode, 
+  encodeCall, 
+  decodeCall,
+  encodeString,
+  decodeString,
+  encodeOpaque,
+  decodeOpaque,
+  RpcConstants, 
+  type XDRHeader 
+} from '../src/shared/xdr';
 
 describe('XDR Encoder/Decoder', () => {
   describe('encode/decode header', () => {
@@ -183,6 +194,164 @@ describe('XDR Encoder/Decoder', () => {
       const decoded = decode(encoded);
 
       expect(decoded).toEqual(header);
+    });
+  });
+
+  describe('string encoding/decoding', () => {
+    test('encodes empty string correctly', () => {
+      const encoded = encodeString('');
+      
+      // Length prefix (4 bytes) + null terminator (1 byte) + padding (3 bytes) = 8 bytes
+      expect(encoded.length).toBe(8);
+      expect(new DataView(encoded.buffer, 0, 4).getUint32(0, false)).toBe(4); // padded length
+      
+      const decoded = decodeString(encoded);
+      expect(decoded).toBe('');
+    });
+
+    test('encodes simple ASCII string with correct padding', () => {
+      const original = 'hello';
+      const encoded = encodeString(original);
+      const decoded = decodeString(encoded);
+
+      // 5 chars + null = 6, padded to 8 bytes + 4 byte length = 12 bytes
+      expect(encoded.length).toBe(12);
+      expect(decoded).toBe(original);
+    });
+
+    test('encodes string exactly divisible by 4', () => {
+      const original = 'abcd';
+      const encoded = encodeString(original);
+      const decoded = decodeString(encoded);
+
+      // 4 chars + null = 5, padded to 8 bytes + 4 byte length = 12 bytes
+      expect(encoded.length).toBe(12);
+      expect(decoded).toBe(original);
+    });
+
+    test('encodes string longer than 4 bytes', () => {
+      const original = 'abcdef';
+      const encoded = encodeString(original);
+      const decoded = decodeString(encoded);
+
+      // 6 chars + null = 7, padded to 8 bytes + 4 byte length = 12 bytes
+      expect(encoded.length).toBe(12);
+      expect(decoded).toBe(original);
+    });
+
+    test('encodes string with special characters', () => {
+      const original = 'Hello, World! @#$%^&*()';
+      const encoded = encodeString(original);
+      const decoded = decodeString(encoded);
+
+      expect(decoded).toBe(original);
+    });
+
+    test('encodes Unicode string correctly', () => {
+      const original = 'こんにちは世界 🌍';
+      const encoded = encodeString(original);
+      const decoded = decodeString(encoded);
+
+      expect(decoded).toBe(original);
+    });
+
+    test('round-trip preserves all string content', () => {
+      const testCases = [
+        '',
+        'a',
+        'ab',
+        'abc',
+        'abcd',
+        'abcde',
+        'test',
+        'test123',
+        'Hello World!',
+        '日本語テスト',
+        'Mixed content 123 !@# αβγδ'
+      ];
+
+      for (const str of testCases) {
+        const encoded = encodeString(str);
+        const decoded = decodeString(encoded);
+
+        expect(decoded).toBe(str);
+      }
+    });
+
+    test('verifies null termination in encoded string', () => {
+      const encoded = encodeString('hello');
+      
+      // Length prefix (4 bytes) + padded string (8 bytes) = 12 bytes total
+      // String is at positions 4-11, null terminator should be at position 8 (6th byte of string region)
+      expect(encoded.length).toBe(12);
+      
+      // Check that there's a null byte somewhere in the padded region
+      const paddedLength = new DataView(encoded.buffer, 0, 4).getUint32(0, false);
+      const stringStart = 4; // after length prefix
+      
+      // Find null terminator in string region
+      let foundNull = false;
+      for (let i = stringStart; i < stringStart + paddedLength; i++) {
+        if (encoded[i] === 0) {
+          foundNull = true;
+          break;
+        }
+      }
+      expect(foundNull).toBe(true);
+    });
+  });
+
+  describe('opaque bytes encoding/decoding', () => {
+    test('encodes empty bytes correctly', () => {
+      const original = new Uint8Array(0);
+      const encoded = encodeOpaque(original);
+      const decoded = decodeOpaque(encoded);
+
+      // 4 byte length prefix + 0 bytes padded to 0 = 4 bytes total
+      expect(encoded.length).toBe(4);
+      expect(decoded).toEqual(original);
+    });
+
+    test('encodes small byte array with padding', () => {
+      const original = new Uint8Array([0x01, 0x02, 0x03]);
+      const encoded = encodeOpaque(original);
+      const decoded = decodeOpaque(encoded);
+
+      // 3 bytes padded to 4 + 4 byte length = 8 bytes
+      expect(encoded.length).toBe(8);
+      expect(decoded).toEqual(original);
+    });
+
+    test('encodes byte array exactly divisible by 4', () => {
+      const original = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+      const encoded = encodeOpaque(original);
+      const decoded = decodeOpaque(encoded);
+
+      // 4 bytes no padding + 4 byte length = 8 bytes
+      expect(encoded.length).toBe(8);
+      expect(decoded).toEqual(original);
+    });
+
+    test('encodes larger byte array', () => {
+      const original = new Uint8Array(100);
+      for (let i = 0; i < 100; i++) {
+        original[i] = i;
+      }
+      
+      const encoded = encodeOpaque(original);
+      const decoded = decodeOpaque(encoded);
+
+      // 100 bytes padded to 100 + 4 byte length = 104 bytes
+      expect(encoded.length).toBe(104);
+      expect(decoded).toEqual(original);
+    });
+
+    test('encodes bytes with various values', () => {
+      const original = new Uint8Array([0x00, 0x01, 0x7F, 0x80, 0xFF]);
+      const encoded = encodeOpaque(original);
+      const decoded = decodeOpaque(encoded);
+
+      expect(decoded).toEqual(original);
     });
   });
 });

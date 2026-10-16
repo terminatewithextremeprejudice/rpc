@@ -77,19 +77,33 @@ class XDRStream {
   }
 
   bytes(data: Uint8Array): number {
-    const paddedLength = Math.ceil(data.length / 4) * 4;
-    const slice = this.buffer.subarray(this.offset, this.offset + paddedLength);
-    slice.set(data);
-    // Ensure padding bytes are zero
-    slice.fill(0, data.length);
-    this.offset += paddedLength;
-    return paddedLength;
+    const paddedLength = data.length > 0 ? Math.ceil(data.length / 4) * 4 : 0;
+    // Write ORIGINAL length (not padded) as per XDR spec
+    const lengthView = new DataView(this.buffer.buffer, this.offset, 4);
+    lengthView.setUint32(0, data.length, false);
+    this.offset += 4;
+    
+    // Write padded bytes (skip if empty)
+    if (paddedLength > 0) {
+      const slice = this.buffer.subarray(this.offset, this.offset + paddedLength);
+      slice.set(data);
+      slice.fill(0, data.length);
+      this.offset += paddedLength;
+    }
+    
+    return paddedLength + 4;
   }
 
   readBytes(): Uint8Array {
-    const length = this.readUint32();
-    const result = this.buffer.subarray(this.offset, this.offset + length);
-    this.offset += length;
+    const originalLength = this.readUint32();
+    
+    if (originalLength === 0) {
+      return new Uint8Array(0);
+    }
+    
+    const paddedLength = Math.ceil(originalLength / 4) * 4;
+    const result = this.buffer.subarray(this.offset, this.offset + originalLength);
+    this.offset += paddedLength;
     return result;
   }
 }
@@ -193,3 +207,35 @@ export const RpcConstants = {
     SYSERR: 5
   }
 } as const;
+
+// Helper functions for string encoding/decoding
+export function encodeString(str: string): Uint8Array {
+  const buffer = new Uint8Array(256);
+  const stream = new XDRStream(buffer);
+  const totalSize = stream.string(str);
+  return buffer.subarray(0, totalSize);
+}
+
+export function decodeString(data: Uint8Array): string {
+  const stream = new XDRStream(data);
+  return stream.readString();
+}
+
+// Helper functions for opaque bytes encoding/decoding  
+export function encodeOpaque(data: Uint8Array): Uint8Array {
+  // XDR opaque: length prefix (uint32) followed by bytes padded to 4-byte boundary
+  // For 0 bytes: length=0, no padding needed, total=4
+  // For 1-3 bytes: length=N, padded to 4, total=4+4=8
+  // For 4 bytes: length=4, no extra padding, total=4+4=8
+  
+  const paddedLength = data.length > 0 ? Math.ceil(data.length / 4) * 4 : 0;
+  const buffer = new Uint8Array(paddedLength + 4); // +4 for length prefix
+  const stream = new XDRStream(buffer);
+  stream.bytes(data);
+  return buffer.subarray(0, stream.offset);
+}
+
+export function decodeOpaque(data: Uint8Array): Uint8Array {
+  const stream = new XDRStream(data);
+  return stream.readBytes();
+}
