@@ -17,16 +17,50 @@ export type XDRHeader = {
 class XDRStream {
   constructor(private buffer: Uint8Array, public offset: number = 0) {}
 
-  private align4(): void {
+  align4(): void {
     const remainder = this.offset % 4;
     if (remainder !== 0) {
+      // Fill padding bytes with zeros to reach 4-byte boundary
+      this.buffer.fill(0, this.offset, this.offset + 4 - remainder);
       this.offset += 4 - remainder;
     }
   }
 
+  uint8(value: number): void {
+    // XDR: single byte, no alignment needed
+    this.buffer[this.offset] = value & 0xFF;
+    this.offset += 1;
+  }
+
+  readUint8(): number {
+    const value = this.buffer[this.offset] || 0;
+    this.offset += 1;
+    return value;
+  }
+
+  uint16(value: number): void {
+    // XDR: 2 bytes, must be 4-byte aligned
+    this.align4();
+    const view = new DataView(this.buffer.buffer, this.offset, 2);
+    view.setUint16(0, value & 0xFFFF, false); // big-endian
+    this.offset += 2;
+    // Pad remaining 2 bytes to maintain 4-byte alignment
+    this.buffer[this.offset] = 0;
+    this.buffer[this.offset + 1] = 0;
+    this.offset += 2;
+  }
+
+  readUint16(): number {
+    this.align4();
+    const view = new DataView(this.buffer.buffer, this.offset, 2);
+    const value = view.getUint16(0, false);
+    this.offset += 4; // Skip the padded region
+    return value;
+  }
+
   uint32(value: number): void {
     const view = new DataView(this.buffer.buffer, this.offset, 4);
-    view.setUint32(0, value, false); // false = big-endian
+    view.setUint32(0, value & 0xFFFFFFFF, false); // big-endian
     this.offset += 4;
   }
 
@@ -34,6 +68,20 @@ class XDRStream {
     const view = new DataView(this.buffer.buffer, this.offset, 4);
     this.offset += 4;
     return view.getUint32(0, false);
+  }
+
+  uint64(value: bigint): void {
+    // XDR uint64 = two consecutive uint32 (high:low)
+    const high = Number(value / 4294967296n); // 0x100000000
+    const low = Number(value % 4294967296n);
+    this.uint32(high);
+    this.uint32(low);
+  }
+
+  readUint64(): bigint {
+    const high = this.readUint32();
+    const low = this.readUint32();
+    return BigInt(high) * 4294967296n + BigInt(low);
   }
 
   hyper(value: number): void {
@@ -47,7 +95,7 @@ class XDRStream {
   readHyper(): bigint {
     const high = this.readUint32();
     const low = this.readUint32();
-    return BigInt(high) * BigInt(0x100000000) + BigInt(low);
+    return BigInt(high) * 4294967296n + BigInt(low);
   }
 
   string(str: string): number {
@@ -238,4 +286,65 @@ export function encodeOpaque(data: Uint8Array): Uint8Array {
 export function decodeOpaque(data: Uint8Array): Uint8Array {
   const stream = new XDRStream(data);
   return stream.readBytes();
+}
+
+// Helper functions for integer types
+export function encodeUint8(value: number): Uint8Array {
+  const buffer = new Uint8Array(1);
+  const stream = new XDRStream(buffer);
+  stream.uint8(value);
+  return buffer.subarray(0, stream.offset);
+}
+
+export function decodeUint8(data: Uint8Array): number {
+  const stream = new XDRStream(data);
+  return stream.readUint8();
+}
+
+export function encodeUint16(value: number): Uint8Array {
+  const buffer = new Uint8Array(8);
+  const stream = new XDRStream(buffer);
+  stream.uint16(value);
+  return buffer.subarray(0, stream.offset);
+}
+
+export function decodeUint16(data: Uint8Array): number {
+  const stream = new XDRStream(data);
+  return stream.readUint16();
+}
+
+export function encodeUint32(value: number): Uint8Array {
+  const buffer = new Uint8Array(4);
+  const stream = new XDRStream(buffer);
+  stream.uint32(value);
+  return buffer.subarray(0, stream.offset);
+}
+
+export function decodeUint32(data: Uint8Array): number {
+  const stream = new XDRStream(data);
+  return stream.readUint32();
+}
+
+export function encodeUint64(value: bigint): Uint8Array {
+  const buffer = new Uint8Array(16);
+  const stream = new XDRStream(buffer);
+  stream.uint64(value);
+  return buffer.subarray(0, stream.offset);
+}
+
+export function decodeUint64(data: Uint8Array): bigint {
+  const stream = new XDRStream(data);
+  return stream.readUint64();
+}
+
+export function encodeHyper(value: number): Uint8Array {
+  const buffer = new Uint8Array(16);
+  const stream = new XDRStream(buffer);
+  stream.hyper(value);
+  return buffer.subarray(0, stream.offset);
+}
+
+export function decodeHyper(data: Uint8Array): bigint {
+  const stream = new XDRStream(data);
+  return stream.readHyper();
 }

@@ -8,6 +8,16 @@ import {
   decodeString,
   encodeOpaque,
   decodeOpaque,
+  encodeUint8,
+  decodeUint8,
+  encodeUint16,
+  decodeUint16,
+  encodeUint32,
+  decodeUint32,
+  encodeUint64,
+  decodeUint64,
+  encodeHyper,
+  decodeHyper,
   RpcConstants, 
   type XDRHeader 
 } from '../src/shared/xdr';
