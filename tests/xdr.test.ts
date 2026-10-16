@@ -364,4 +364,133 @@ describe('XDR Encoder/Decoder', () => {
       expect(decoded).toEqual(original);
     });
   });
+
+  describe('Integer types (uint8, uint16, uint32, uint64, hyper)', () => {
+    describe('uint8', () => {
+      test('encodes and decodes byte values', () => {
+        const testValues = [0, 1, 127, 128, 255];
+        
+        for (const value of testValues) {
+          const encoded = encodeUint8(value);
+          expect(encoded).toEqual(new Uint8Array([value]));
+          
+          const decoded = decodeUint8(encoded);
+          expect(decoded).toBe(value);
+        }
+      });
+
+      test('round-trip preserves value', () => {
+        const original = 42;
+        const encoded = encodeUint8(original);
+        const decoded = decodeUint8(encoded);
+        expect(decoded).toBe(original);
+      });
+    });
+
+    describe('uint16', () => {
+      test('encodes with 4-byte alignment', () => {
+        const encoded = encodeUint16(0x1234);
+        
+        // uint16 is padded to 4 bytes in XDR
+        expect(encoded.length).toBe(4);
+        
+        // First 2 bytes should be the value (big-endian)
+        expect(encoded[0]).toBe(0x12);
+        expect(encoded[1]).toBe(0x34);
+        // Last 2 bytes are padding
+        expect(encoded[2]).toBe(0);
+        expect(encoded[3]).toBe(0);
+      });
+
+      test('round-trip preserves value', () => {
+        const testValues = [0, 1, 0x1234, 0xFFFF];
+        
+        for (const value of testValues) {
+          const encoded = encodeUint16(value);
+          const decoded = decodeUint16(encoded);
+          expect(decoded).toBe(value);
+        }
+      });
+    });
+
+    describe('uint32', () => {
+      test('encodes full 32-bit values (big-endian)', () => {
+        const encoded = encodeUint32(0x12345678);
+        
+        expect(encoded.length).toBe(4);
+        expect(encoded[0]).toBe(0x12);
+        expect(encoded[1]).toBe(0x34);
+        expect(encoded[2]).toBe(0x56);
+        expect(encoded[3]).toBe(0x78);
+      });
+
+      test('round-trip with various values', () => {
+        const testValues = [0, 1, 0x12345678, 0xFFFFFFFF];
+        
+        for (const value of testValues) {
+          const encoded = encodeUint32(value);
+          const decoded = decodeUint32(encoded);
+          expect(decoded).toBe(value);
+        }
+      });
+    });
+
+    describe('uint64', () => {
+      test('encodes 64-bit bigint as two uint32s', () => {
+        const original = 0x123456789ABCDEF0n;
+        const encoded = encodeUint64(original);
+        
+        expect(encoded.length).toBe(8);
+        
+        // High 32 bits
+        expect(encoded[0]).toBe(0x12);
+        expect(encoded[1]).toBe(0x34);
+        expect(encoded[2]).toBe(0x56);
+        expect(encoded[3]).toBe(0x78);
+        
+        // Low 32 bits
+        expect(encoded[4]).toBe(0x9A);
+        expect(encoded[5]).toBe(0xBC);
+        expect(encoded[6]).toBe(0xDE);
+        expect(encoded[7]).toBe(0xF0);
+      });
+
+      test('round-trip preserves bigint', () => {
+        const testValues: bigint[] = [
+          0n,
+          1n,
+          0x12345678n,
+          0x123456789ABCDEF0n,
+          0xFFFFFFFFFFFFFFFFn
+        ];
+        
+        for (const value of testValues) {
+          const encoded = encodeUint64(value);
+          const decoded = decodeUint64(encoded);
+          expect(decoded).toBe(value);
+        }
+      });
+    });
+
+    describe('hyper', () => {
+      test('encodes hyper as two uint32s', () => {
+        const original = 0x123456789ABCDEF0;
+        const encoded = encodeHyper(original);
+        
+        expect(encoded.length).toBe(8);
+        
+        const decoded = decodeHyper(encoded);
+        // hyper uses Number so we can compare with .toNumber()
+        expect(decoded - BigInt(original)).toBe(0n);
+      });
+
+      test('handles maximum uint64 value', () => {
+        const original = 0xFFFFFFFFFFFFFFFF;
+        const encoded = encodeHyper(original);
+        const decoded = decodeHyper(encoded);
+        
+        expect(decoded).toBe(BigInt(original));
+      });
+    });
+  });
 });
