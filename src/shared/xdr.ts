@@ -152,6 +152,11 @@ export function encodeCall(procedure: number, version: number, argType: number, 
 export function decodeCall(data: Uint8Array): { procedure: number; version: number; argType: number; authType: number } {
   const stream = new XDRStream(data);
   
+  // Skip the 3 header uint32s (version, type, headerLength)
+  stream.readUint32(); // version
+  stream.readUint32(); // type
+  stream.readUint32(); // headerLength
+  
   return {
     procedure: stream.readUint32(),
     version: stream.readUint32(),

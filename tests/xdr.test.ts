@@ -1,0 +1,188 @@
+import { describe, expect, test } from '@jest/globals';
+import { encode, decode, encodeCall, decodeCall, RpcConstants, type XDRHeader } from '../src/shared/xdr';
+
+describe('XDR Encoder/Decoder', () => {
+  describe('encode/decode header', () => {
+    test('encodes basic XDR header correctly', () => {
+      const header: XDRHeader = {
+        version: 2,
+        type: 0,
+        headerLength: 16,
+        authType: 0
+      };
+
+      const encoded = encode(header);
+
+      expect(encoded).toBeInstanceOf(Uint8Array);
+      expect(encoded.length).toBe(16);
+      
+      // Verify big-endian encoding
+      expect(encoded[0]).toBe(0); // version high bytes
+      expect(encoded[1]).toBe(0);
+      expect(encoded[2]).toBe(0);
+      expect(encoded[3]).toBe(2); // version = 2
+
+      expect(encoded[4]).toBe(0); // type high bytes
+      expect(encoded[5]).toBe(0);
+      expect(encoded[6]).toBe(0);
+      expect(encoded[7]).toBe(0); // type = 0
+    });
+
+    test('decodes encoded header back to original', () => {
+      const original: XDRHeader = {
+        version: RpcConstants.RPC_VERSION,
+        type: RpcConstants.CallTypes.RPC_CALL,
+        headerLength: 16,
+        authType: RpcConstants.AuthFlavors.AUTH_NULL
+      };
+
+      const encoded = encode(original);
+      const decoded = decode(encoded);
+
+      expect(decoded.version).toBe(original.version);
+      expect(decoded.type).toBe(original.type);
+      expect(decoded.headerLength).toBe(original.headerLength);
+      expect(decoded.authType).toBe(original.authType);
+    });
+
+    test('handles large version numbers (big-endian)', () => {
+      const header: XDRHeader = {
+        version: 0x12345678,
+        type: 0xABCDEF01,
+        headerLength: 0xFEDCBA98,
+        authType: 0x87654321
+      };
+
+      const encoded = encode(header);
+      const decoded = decode(encoded);
+
+      expect(decoded.version).toBe(header.version);
+      expect(decoded.type).toBe(header.type);
+      expect(decoded.headerLength).toBe(header.headerLength);
+      expect(decoded.authType).toBe(header.authType);
+    });
+
+    test('round-trip preserves all header fields', () => {
+      const testCases: XDRHeader[] = [
+        { version: 0, type: 0, headerLength: 0, authType: 0 },
+        { version: 1, type: 1, headerLength: 1, authType: 1 },
+        { version: 2, type: 2, headerLength: 20, authType: 2 },
+        { version: 65535, type: 42, headerLength: 100, authType: 255 }
+      ];
+
+      for (const header of testCases) {
+        const encoded = encode(header);
+        const decoded = decode(encoded);
+
+        expect(decoded).toEqual(header);
+      }
+    });
+
+    test('throws error when buffer is too small', () => {
+      const smallBuffer = new Uint8Array(12); // Need at least 16
+
+      expect(() => decode(smallBuffer)).toThrow(/must be at least 16 bytes/);
+    });
+  });
+
+  describe('encodeCall/decodeCall', () => {
+    test('encodes RPC call with procedure and version', () => {
+      const args: XDRHeader = {
+        version: 1,
+        type: 0,
+        headerLength: 0,
+        authType: RpcConstants.AuthFlavors.UNIX_AUTH
+      };
+
+      const encoded = encodeCall(100000, 2, 100001, args);
+      const decoded = decodeCall(encoded);
+
+      expect(decoded.procedure).toBe(100000);
+      expect(decoded.version).toBe(2);
+      expect(decoded.argType).toBe(100001);
+      expect(decoded.authType).toBe(RpcConstants.AuthFlavors.UNIX_AUTH);
+    });
+
+    test('handles program/procedure numbers for common RPC services', () => {
+      const nfsProgram: XDRHeader = {
+        version: 3,
+        type: 0,
+        headerLength: 0,
+        authType: 0
+      };
+
+      const encoded = encodeCall(100003, 3, 1, nfsProgram); // NFS program number
+      const decoded = decodeCall(encoded);
+
+      expect(decoded.procedure).toBe(100003);
+      expect(decoded.version).toBe(3);
+    });
+  });
+
+  describe('RpcConstants', () => {
+    test('exports correct RPC version', () => {
+      expect(RpcConstants.RPC_VERSION).toBe(2);
+    });
+
+    test('exports call types', () => {
+      expect(RpcConstants.CallTypes).toEqual({
+        RPC_CALL: 0,
+        RPC_CALL_ACK: 1,
+        RPC_REPLY: 2,
+        RPC_MISMATCH: 3,
+        RPC_SYSTEM_ERR: 4,
+        RPC_ACCEPT_ERR: 5
+      });
+    });
+
+    test('exports auth flavors', () => {
+      expect(RpcConstants.AuthFlavors).toEqual({
+        AUTH_NULL: 0,
+        UNIX_AUTH: 1,
+        DES_AUTH: 2
+      });
+    });
+
+    test('exports reply states', () => {
+      expect(RpcConstants.ReplyStates).toEqual({
+        RPC_ACCEPTED: 0,
+        RPC_GARBAGE: 1,
+        RPC_VERSION: 2,
+        PROG_MISMATCH: 3,
+        PROC_MISMATCH: 4,
+        SYSERR: 5
+      });
+    });
+  });
+
+  describe('edge cases', () => {
+    test('handles zero values correctly', () => {
+      const header: XDRHeader = {
+        version: 0,
+        type: 0,
+        headerLength: 0,
+        authType: 0
+      };
+
+      const encoded = encode(header);
+      expect(encoded.every(b => b === 0)).toBe(true);
+
+      const decoded = decode(encoded);
+      expect(decoded).toEqual(header);
+    });
+
+    test('handles maximum uint32 values', () => {
+      const header: XDRHeader = {
+        version: 0xFFFFFFFF,
+        type: 0xFFFFFFFF,
+        headerLength: 0xFFFFFFFF,
+        authType: 0xFFFFFFFF
+      };
+
+      const encoded = encode(header);
+      const decoded = decode(encoded);
+
+      expect(decoded).toEqual(header);
+    });
+  });
+});
