@@ -49,6 +49,10 @@ export class RpcServer {
     }
 
     await this.transport.connect();
+    
+    // For server-mode transports, wait for client connection
+    await (this.transport as any).waitForConnection?.();
+    
     this.running = true;
     console.log(`[RPC Server] Started, transport connected`);
   }
