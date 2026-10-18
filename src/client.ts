@@ -74,7 +74,7 @@ export class RpcClient {
       throw new Error('Not connected to server');
     }
 
-    // Encode the RPC call message
+    // Encode the RPC call message with arguments
     const callHeader: XDRHeader = {
       version: RpcConstants.RPC_VERSION,
       type: RpcConstants.CallTypes.RPC_CALL,
@@ -82,24 +82,49 @@ export class RpcClient {
       authType: RpcConstants.AuthFlavors.AUTH_NULL
     };
 
-    const encodedCall = encodeCall(
-      this.prognum, // procedure
-      this.vers,    // version
-      proc,          // procedure number
+    const encodedCallHeader = encodeCall(
+      this.prognum, // prognum
+      this.vers,    // vers
+      proc,          // proc
       callHeader
     );
 
-    console.log(`[RPC Client] Sending CALL: prog=${this.prognum}, vers=${this.vers}, proc=${proc}`);
+    // Append arguments as opaque data
+    const encodedArgs = this.encodeOpaqueArgs(args);
+    
+    const fullCall = new Uint8Array([...encodedCallHeader, ...encodedArgs]);
+    const bufferSize = 16 + 20 + new TextEncoder().encode('arg').length + 10; // Estimate response size
+
+    console.log(`[RPC Client] Sending CALL: prog=${this.prognum}, vers=${this.vers}, proc=${proc}, args=${args.length} bytes`);
 
     // Send the request
-    await this.transport.send(encodedCall);
+    await this.transport.send(fullCall);
 
     // Receive the response
-    // Response should be at least 16 bytes (header) + 12 bytes (reply)
-    const response = await this.transport.receive(28);
+    const response = await this.transport.receive(bufferSize);
 
     // Decode and return
     return this.decodeResponse(response);
+  }
+
+  /**
+   * Encode opaque arguments for RPC call
+   */
+  private encodeOpaqueArgs(data: Uint8Array): Uint8Array {
+    const paddedLength = data.length > 0 ? Math.ceil(data.length / 4) * 4 : 0;
+    const buffer = new Uint8Array(paddedLength + 4);
+    
+    // Write length prefix
+    const view = new DataView(buffer.buffer, 0, 4);
+    view.setUint32(0, data.length, false);
+    
+    // Write padded data
+    if (paddedLength > 0) {
+      buffer.subarray(4, 4 + paddedLength).set(data);
+      buffer.subarray(4 + data.length, 4 + paddedLength).fill(0);
+    }
+    
+    return buffer.subarray(0, paddedLength + 4);
   }
 
   /**

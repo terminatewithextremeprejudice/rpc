@@ -25,9 +25,8 @@ export {
 export { 
   Transport,
   TcpTransport,
-  HttpTransport,
-  UnixSocketTransport,
   UdpTransport,
+  UnixSocketTransport,
   SharedMemoryTransport,
   TransportFactory
 } from './transport';
