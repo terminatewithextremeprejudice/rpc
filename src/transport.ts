@@ -34,34 +34,50 @@ export abstract class Transport {
   abstract isConnected(): boolean;
 }
 
-// TCP Transport
+// TCP Transport (supports both server and client modes)
 export class TcpTransport implements Transport {
+  private server: any = null;
   private socket: any = null;
   private host: string;
   private port: number;
   private connected: boolean = false;
+  private isServer: boolean;
 
-  constructor(host: string = '127.0.0.1', port: number = 5000) {
+  constructor(host: string = '127.0.0.1', port: number = 5000, isServer: boolean = false) {
     this.host = host;
     this.port = port;
+    this.isServer = isServer;
   }
 
   async connect(): Promise<void> {
     const net = await import('net');
-    this.socket = net.createConnection({ host: this.host, port: this.port });
     
-    await new Promise<void>((resolve, reject) => {
-      this.socket.once('connect', () => {
+    if (this.isServer) {
+      // Server mode: create server and listen
+      this.server = net.createServer((sock: any) => {
+        this.socket = sock;
         this.connected = true;
-        resolve();
       });
-      this.socket.once('error', (err: Error) => reject(err));
-    });
-
-    // Handle disconnection
-    this.socket.once('close', () => {
-      this.connected = false;
-    });
+      
+      return new Promise<void>((resolve, reject) => {
+        this.server.once('listening', () => {
+          resolve();
+        });
+        this.server.once('error', (err: Error) => reject(err));
+        this.server.listen(this.port, this.host);
+      });
+    } else {
+      // Client mode: connect to server
+      this.socket = net.createConnection({ host: this.host, port: this.port });
+      
+      await new Promise<void>((resolve, reject) => {
+        this.socket.once('connect', () => {
+          this.connected = true;
+          resolve();
+        });
+        this.socket.once('error', (err: Error) => reject(err));
+      });
+    }
   }
 
   async send(data: Uint8Array): Promise<void> {
