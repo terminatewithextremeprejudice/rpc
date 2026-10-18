@@ -250,8 +250,7 @@ export class UnixSocketTransport implements Transport {
   }
 }
 
-// Shared Memory Transport (basic implementation using node-ffi/napi or child processes)
-// For now, we'll implement a simple pipe-based alternative
+// Shared Memory Transport (basic implementation using file-based approach)
 export class SharedMemoryTransport implements Transport {
   private fd: number = -1;
   private path: string;
@@ -263,11 +262,7 @@ export class SharedMemoryTransport implements Transport {
 
   async connect(): Promise<void> {
     const fs = await import('fs');
-    const os = await import('os');
     
-    // Create or open POSIX shared memory (Linux/macOS)
-    // Note: This requires Node.js 19+ with experimental features or node-ffi-napi
-    // For compatibility, we'll use a file-based approach
     try {
       if (!fs.existsSync(this.path)) {
         fs.writeFileSync(this.path, Buffer.alloc(65536)); // 64KB shared memory
@@ -315,11 +310,92 @@ export class SharedMemoryTransport implements Transport {
   }
 }
 
+// UDP Transport
+export class UdpTransport implements Transport {
+  public port: number;
+  public host: string;
+  private socket: any = null;
+  private connectedState: boolean = false;
+
+  constructor(host: string = '127.0.0.1', port: number = 5000) {
+    this.host = host;
+    this.port = port;
+  }
+
+  async connect(): Promise<void> {
+    const dgram = await import('dgram');
+    this.socket = dgram.createSocket('udp4');
+    this.connectedState = true;
+
+    // Bind to port
+    return new Promise((resolve, reject) => {
+      this.socket.once('ready', resolve);
+      this.socket.once('error', reject);
+      this.socket.bind(this.port, this.host);
+    });
+  }
+
+  async send(data: Uint8Array): Promise<void> {
+    if (!this.connectedState) {
+      throw new Error('UDP transport not connected');
+    }
+
+    return new Promise((resolve, reject) => {
+      this.socket.send(data, 0, data.length, this.port, this.host, (err?: Error) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  async receive(bufferSize: number): Promise<Uint8Array> {
+    if (!this.connectedState) {
+      throw new Error('UDP transport not connected');
+    }
+
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const onData = (data: Buffer) => {
+        this.socket.removeListener('data', onData);
+        this.socket.removeListener('error', onError);
+        resolve(new Uint8Array(data));
+      };
+
+      const onError = (err: Error) => {
+        this.socket.removeListener('data', onData);
+        this.socket.removeListener('error', onError);
+        reject(err);
+      };
+
+      this.socket.once('data', onData);
+      this.socket.once('error', onError);
+
+      // Timeout for receive
+      setTimeout(() => {
+        this.socket.removeListener('data', onData);
+        this.socket.removeListener('error', onError);
+        reject(new Error('UDP receive timeout'));
+      }, 2000);
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.socket) {
+      this.socket.close();
+      this.connectedState = false;
+    }
+  }
+
+  isConnected(): boolean {
+    return this.connectedState && this.socket && !this.socket._handle;
+  }
+}
+
 // Factory for creating transport instances
 export class TransportFactory {
   static create(type: 'tcp', host: string, port: number): TcpTransport;
   static create(type: 'http', url: string): HttpTransport;
   static create(type: 'unix', path: string): UnixSocketTransport;
+  static create(type: 'udp', host: string, port: number): UdpTransport;
   static create(type: 'memory', path: string): SharedMemoryTransport;
   static create(type: string, ...args: any[]): Transport {
     switch (type) {
@@ -329,6 +405,8 @@ export class TransportFactory {
         return new HttpTransport(args[0]);
       case 'unix':
         return new UnixSocketTransport(args[0]);
+      case 'udp':
+        return new UdpTransport(args[0], args[1]);
       case 'memory':
         return new SharedMemoryTransport(args[0]);
       default:
