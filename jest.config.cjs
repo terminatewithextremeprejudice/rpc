@@ -4,8 +4,17 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src', '<rootDir>/tests'],
   collectCoverageFrom: ['src/**/*.ts'],
+  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx'],
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
+      tsconfig: {
+        module: 'CommonJS',
+        moduleResolution: 'Node',
+        esModuleInterop: true,
+        allowSyntheticDefaultImports: true,
+        isolatedModules: false,
+        downlevelIteration: true
+      },
       diagnostics: {
         ignoreCodes: [151002]
       }

@@ -2,6 +2,9 @@
 import { describe, test, beforeAll, afterAll, expect } from '@jest/globals';
 import { Worker } from 'node:worker_threads';
 import { RpcServer } from '../../src';
+import * as pathModule from 'node:path';
+
+const testDir = pathModule.dirname(require.resolve('./transport.test.ts'));
 
 interface TestTransportConfig {
   name: string;
@@ -60,10 +63,8 @@ function runTransportTest(config: TestTransportConfig): void {
       };
 
       return new Promise<void>((resolve, reject) => {
-        const worker = new Worker(
-          new URL('./worker-client.ts', import.meta.url),
-          { workerData }
-        );
+        const workerPath = pathModule.join(testDir, './worker-client.ts');
+        const worker = new Worker(workerPath, { workerData });
 
         const timeout = setTimeout(() => {
           worker.terminate();
