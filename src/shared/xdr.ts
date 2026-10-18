@@ -68,11 +68,11 @@ export function encodeHyper(value: BigInt64Array | Uint8Array | bigint): Uint8Ar
   const buf = new Uint8Array(8);
   const view = new DataView(buf.buffer, 0, 8);
   if (value instanceof BigInt64Array) {
-    view.setBigUint64(0, BigInt(value[0]), false);
+    view.setBigUint64(0, BigInt(value[0] ?? 0n), false);
   } else if (value instanceof Uint8Array) {
     buf.set(value.slice(0, 8));
   } else {
-    view.setBigUint64(0, value as any, false);
+    view.setBigUint64(0, BigInt(value), false);
   }
   return buf;
 }
@@ -92,7 +92,7 @@ export function encodeString(str: string): Uint8Array {
   
   // Copy string bytes + null terminator
   for (let i = 0; i < rawBytes.length; i++) {
-    buf[4 + i] = rawBytes[i];
+    buf[4 + i] = rawBytes[i] ?? 0;
   }
   // Fill rest with null bytes
   for (let i = rawBytes.length + 4; i < buf.length; i++) {
@@ -114,7 +114,7 @@ export function encodeOpaque(data: Uint8Array): Uint8Array {
   
   // Copy data into padded buffer
   for (let i = 0; i < data.length; i++) {
-    buf[4 + i] = data[i];
+    buf[4 + i] = data[i] ?? 0;
   }
   // Fill rest with zeros
   for (let i = data.length + 4; i < buf.length; i++) {
@@ -133,6 +133,21 @@ export function decodeUint32(buffer: Uint8Array, offset: number = 0): number {
 }
 
 export function decodeUint64(buffer: Uint8Array, offset: number = 0): bigint {
+  const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 8);
+  return view.getBigUint64(0, false);
+}
+
+export function decodeUint8(buffer: Uint8Array, offset: number = 0): number {
+  const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 4);
+  return view.getUint32(0, false); // XDR pads to 32-bit
+}
+
+export function decodeUint16(buffer: Uint8Array, offset: number = 0): number {
+  const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 4);
+  return view.getUint32(0, false); // XDR pads to 32-bit
+}
+
+export function decodeHyper(buffer: Uint8Array, offset: number = 0): bigint {
   const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 8);
   return view.getBigUint64(0, false);
 }
