@@ -146,13 +146,17 @@ export function decodeUint64(buffer: Uint8Array, offset: number = 0): bigint {
 }
 
 export function decodeUint8(buffer: Uint8Array, offset: number = 0): number {
-  const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 4);
-  return view.getUint32(0, false); // XDR pads to 32-bit
+  if (buffer.length - offset < 1) {
+    throw new Error(`Buffer too small for decodeUint8 at offset ${offset}`);
+  }
+  return buffer[offset];
 }
 
 export function decodeUint16(buffer: Uint8Array, offset: number = 0): number {
-  const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 4);
-  return view.getUint32(0, false); // XDR pads to 32-bit
+  if (buffer.length - offset < 4) {
+    throw new Error(`Buffer too small for decodeUint16 at offset ${offset}`);
+  }
+  return (buffer[offset] << 8) | buffer[offset + 1];
 }
 
 export function decodeHyper(buffer: Uint8Array, offset: number = 0): bigint {
