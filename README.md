@@ -4,7 +4,7 @@ A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and b
 
 ## How to use 
 
-```
+``` typescript
 // Simple RPC Client/Server Demo
 // Shows basic request/response working via different transports
 
