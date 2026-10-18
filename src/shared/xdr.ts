@@ -43,9 +43,9 @@ export function encodeUint8(value: number): Uint8Array {
 
 export function encodeUint16(value: number): Uint8Array {
   const buf = new Uint8Array(4);
-  const view = new DataView(buf.buffer, 0, 4);
-  view.setUint32(0, value, false); // big-endian with padding
-  // Clear the high word for uint16
+  // Store as big-endian with high byte first, zero-padded
+  buf[0] = (value >> 8) & 0xFF;
+  buf[1] = value & 0xFF;
   buf[2] = 0;
   buf[3] = 0;
   return buf;
