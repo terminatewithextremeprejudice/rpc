@@ -239,7 +239,7 @@ export function decodeCall(buffer: Uint8Array, offset: number = 0): { procedure:
     procedure: decodeUint32(buffer, o),
     version: decodeUint32(buffer, o + 4),
     argType: decodeUint32(buffer, o + 8),
-    authType: decodeUint32(buffer, o + 20),
+    authType: decodeUint32(buffer, o + 28),
     header: {
       version: decodeUint32(buffer, o + 16),
       type: decodeUint32(buffer, o + 20),
