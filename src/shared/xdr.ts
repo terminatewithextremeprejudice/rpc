@@ -13,20 +13,24 @@ export const RpcConstants = {
   RPC_VERSION: 2,
   CallTypes: {
     RPC_CALL: 0,
-    RPC_REPLY: 1,
+    RPC_CALL_ACK: 1,
+    RPC_REPLY: 2,
+    RPC_MISMATCH: 3,
+    RPC_SYSTEM_ERR: 4,
+    RPC_ACCEPT_ERR: 5,
   },
   AuthFlavors: {
     AUTH_NULL: 0,
-    AUTH_SHORT: 1,
-    AUTH_KRB: 2,
-    AUTHKERB4: 3,
+    UNIX_AUTH: 1,
+    DES_AUTH: 2,
   },
   ReplyStates: {
     RPC_ACCEPTED: 0,
-    RPC_REJECTED: 1,
-    RPC_GARBAGE: 0,
-    RPC_MISMATCH: 1,
-    RPC_UNKNOWN: 2,
+    RPC_GARBAGE: 1,
+    RPC_VERSION: 2,
+    PROG_MISMATCH: 3,
+    PROC_MISMATCH: 4,
+    SYSERR: 5,
   },
 };
 
@@ -34,16 +38,16 @@ export const RpcConstants = {
  * XDR Integer Encoding (all big-endian)
  */
 export function encodeUint8(value: number): Uint8Array {
-  const buf = new Uint8Array(4); // XDR pads to 32-bit boundaries
-  const view = new DataView(buf.buffer, 0, 4);
-  view.setUint32(0, value, false); // false = big-endian
-  return buf;
+  return new Uint8Array([value]);
 }
 
 export function encodeUint16(value: number): Uint8Array {
   const buf = new Uint8Array(4);
   const view = new DataView(buf.buffer, 0, 4);
-  view.setUint32(0, value, false);
+  view.setUint32(0, value, false); // big-endian with padding
+  // Clear the high word for uint16
+  buf[2] = 0;
+  buf[3] = 0;
   return buf;
 }
 
@@ -61,9 +65,12 @@ export function encodeUint64(value: bigint): Uint8Array {
   return buf;
 }
 
-export function encodeHyper(value: BigInt64Array | Uint8Array | bigint): Uint8Array {
+export function encodeHyper(value: BigInt64Array | Uint8Array | bigint | number): Uint8Array {
   if (typeof value === 'bigint') {
     return encodeUint64(value);
+  }
+  if (typeof value === 'number') {
+    return encodeUint64(BigInt(value));
   }
   const buf = new Uint8Array(8);
   const view = new DataView(buf.buffer, 0, 8);
@@ -88,13 +95,14 @@ export function encodeString(str: string): Uint8Array {
   
   const buf = new Uint8Array(4 + paddedLen);
   const view = new DataView(buf.buffer, 0, 4);
+  // Store the actual string length (not padded)
   view.setUint32(0, rawBytes.length, false);
   
-  // Copy string bytes + null terminator
+  // Copy string bytes
   for (let i = 0; i < rawBytes.length; i++) {
-    buf[4 + i] = rawBytes[i] ?? 0;
+    buf[4 + i] = rawBytes[i]!;
   }
-  // Fill rest with null bytes
+  // Fill rest with null bytes (includes null terminator)
   for (let i = rawBytes.length + 4; i < buf.length; i++) {
     buf[i] = 0;
   }
@@ -180,6 +188,9 @@ export function encode(header: XDRHeader): Uint8Array {
  * Decode XDR Header from buffer
  */
 export function decode(buffer: Uint8Array): XDRHeader {
+  if (buffer.length < 16) {
+    throw new Error(`XDR header buffer must be at least 16 bytes (got ${buffer.length})`);
+  }
   const offset = 0;
   return {
     version: decodeUint32(buffer, offset),
@@ -211,12 +222,13 @@ export function encodeCall(prognum: number, vers: number, proc: number, header: 
 /**
  * Decode RPC Call header
  */
-export function decodeCall(buffer: Uint8Array, offset: number = 0): { prognum: number, vers: number, proc: number, header: XDRHeader } {
+export function decodeCall(buffer: Uint8Array, offset: number = 0): { procedure: number, version: number, argType: number, authType: number, header: XDRHeader } {
   const o = offset;
   return {
-    prognum: decodeUint32(buffer, o),
-    vers: decodeUint32(buffer, o + 4),
-    proc: decodeUint32(buffer, o + 8),
+    procedure: decodeUint32(buffer, o),
+    version: decodeUint32(buffer, o + 4),
+    argType: decodeUint32(buffer, o + 8),
+    authType: decodeUint32(buffer, o + 20),
     header: {
       version: decodeUint32(buffer, o + 16),
       type: decodeUint32(buffer, o + 20),

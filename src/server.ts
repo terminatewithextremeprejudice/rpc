@@ -12,6 +12,7 @@ export interface RpcHandler {
 
 export interface RpcServerOptions {
   transport: Transport;
+  isServer?: boolean;
   transportConfig?: {
     host?: string;
     port?: number;
