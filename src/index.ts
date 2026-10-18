@@ -33,16 +33,22 @@ export {
 
 export { 
   RpcClient,
-  RpcCallResult,
   createTcpClient,
   createUnixClient,
   createHttpClient
 } from './client';
 
+export type {
+  RpcCallResult
+} from './client';
+
 export { 
   RpcServer,
-  RpcHandler,
-  RpcServerOptions,
   startRpcServer,
   startUnixRpcServer
+} from './server';
+
+export type {
+  RpcHandler,
+  RpcServerOptions
 } from './server';
