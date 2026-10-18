@@ -95,8 +95,8 @@ export function encodeString(str: string): Uint8Array {
   
   const buf = new Uint8Array(4 + paddedLen);
   const view = new DataView(buf.buffer, 0, 4);
-  // Store the actual string length (not padded)
-  view.setUint32(0, rawBytes.length, false);
+  // Store the padded length including null terminator
+  view.setUint32(0, paddedLen, false);
   
   // Copy string bytes
   for (let i = 0; i < rawBytes.length; i++) {
@@ -149,14 +149,14 @@ export function decodeUint8(buffer: Uint8Array, offset: number = 0): number {
   if (buffer.length - offset < 1) {
     throw new Error(`Buffer too small for decodeUint8 at offset ${offset}`);
   }
-  return buffer[offset];
+  return buffer[offset]!;
 }
 
 export function decodeUint16(buffer: Uint8Array, offset: number = 0): number {
   if (buffer.length - offset < 4) {
     throw new Error(`Buffer too small for decodeUint16 at offset ${offset}`);
   }
-  return (buffer[offset] << 8) | buffer[offset + 1];
+  return (buffer[offset]! << 8) | buffer[offset + 1]!;
 }
 
 export function decodeHyper(buffer: Uint8Array, offset: number = 0): bigint {
@@ -165,10 +165,17 @@ export function decodeHyper(buffer: Uint8Array, offset: number = 0): bigint {
 }
 
 export function decodeString(buffer: Uint8Array, offset: number = 0): string {
-  const count = decodeUint32(buffer, offset);
-  const strBytes = buffer.subarray(offset + 4, offset + 4 + count);
+  const paddedLen = decodeUint32(buffer, offset);
+  const strBytes = buffer.subarray(offset + 4, offset + 4 + paddedLen);
+  // Find the actual string content by stopping at the null terminator
+  let actualLen = 0;
+  for (let i = 0; i < strBytes.length; i++) {
+    if (strBytes[i] === 0) break;
+    actualLen++;
+  }
+  const content = strBytes.subarray(0, actualLen);
   const decoder = new TextDecoder();
-  return decoder.decode(strBytes);
+  return decoder.decode(content);
 }
 
 export function decodeOpaque(buffer: Uint8Array, offset: number = 0): Uint8Array {
