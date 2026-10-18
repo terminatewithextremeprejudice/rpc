@@ -124,6 +124,9 @@ export class TcpTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    if (this.isServer && this.server) {
+      this.server.close();
+    }
     if (this.socket) {
       this.socket.destroy();
       this.connected = false;
@@ -132,6 +135,19 @@ export class TcpTransport implements Transport {
 
   isConnected(): boolean {
     return this.connected && this.socket && !this.socket.destroyed;
+  }
+  
+  // For server mode, signal that we have an incoming connection
+  async waitForConnection(): Promise<void> {
+    if (!this.isServer) return;
+    return new Promise<void>((resolve, reject) => {
+      if (this.connected && this.socket) {
+        resolve();
+      } else {
+        this.server.once('connection', () => resolve());
+        setTimeout(() => reject(new Error('Connection wait timeout')), 5000);
+      }
+    });
   }
 }
 
@@ -184,31 +200,48 @@ export class HttpTransport implements Transport {
   }
 }
 
-// Unix Domain Socket Transport
+// Unix Domain Socket Transport (supports both server and client modes)
 export class UnixSocketTransport implements Transport {
+  private server: any = null;
   private socket: any = null;
   private path: string;
   private connected: boolean = false;
+  private isServer: boolean;
 
-  constructor(path: string) {
+  constructor(path: string, isServer: boolean = false) {
     this.path = path;
+    this.isServer = isServer;
   }
 
   async connect(): Promise<void> {
     const net = await import('net');
-    this.socket = net.createConnection({ path: this.path });
     
-    await new Promise<void>((resolve, reject) => {
-      this.socket.once('connect', () => {
+    if (this.isServer) {
+      // Server mode: create server and listen
+      this.server = net.createServer((sock: any) => {
+        this.socket = sock;
         this.connected = true;
-        resolve();
       });
-      this.socket.once('error', (err: Error) => reject(err));
-    });
-
-    this.socket.once('close', () => {
-      this.connected = false;
-    });
+      
+      return new Promise<void>((resolve, reject) => {
+        this.server.once('listening', () => {
+          resolve();
+        });
+        this.server.once('error', (err: Error) => reject(err));
+        this.server.listen(this.path);
+      });
+    } else {
+      // Client mode: connect to server
+      this.socket = net.createConnection({ path: this.path });
+      
+      await new Promise<void>((resolve, reject) => {
+        this.socket.once('connect', () => {
+          this.connected = true;
+          resolve();
+        });
+        this.socket.once('error', (err: Error) => reject(err));
+      });
+    }
   }
 
   async send(data: Uint8Array): Promise<void> {
@@ -255,6 +288,9 @@ export class UnixSocketTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    if (this.isServer && this.server) {
+      this.server.close();
+    }
     if (this.socket) {
       this.socket.destroy();
       this.connected = false;
@@ -263,6 +299,18 @@ export class UnixSocketTransport implements Transport {
 
   isConnected(): boolean {
     return this.connected && this.socket && !this.socket.destroyed;
+  }
+  
+  async waitForConnection(): Promise<void> {
+    if (!this.isServer) return;
+    return new Promise<void>((resolve, reject) => {
+      if (this.connected && this.socket) {
+        resolve();
+      } else {
+        this.server.once('connection', () => resolve());
+        setTimeout(() => reject(new Error('Connection wait timeout')), 5000);
+      }
+    });
   }
 }
 
@@ -326,16 +374,18 @@ export class SharedMemoryTransport implements Transport {
   }
 }
 
-// UDP Transport
+// UDP Transport (supports both server and client modes)
 export class UdpTransport implements Transport {
   public port: number;
   public host: string;
   private socket: any = null;
   private connectedState: boolean = false;
+  private isServer: boolean;
 
-  constructor(host: string = '127.0.0.1', port: number = 5000) {
+  constructor(host: string = '127.0.0.1', port: number = 5000, isServer: boolean = false) {
     this.host = host;
     this.port = port;
+    this.isServer = isServer;
   }
 
   async connect(): Promise<void> {
@@ -343,7 +393,7 @@ export class UdpTransport implements Transport {
     this.socket = dgram.createSocket('udp4');
     this.connectedState = true;
 
-    // Bind to port
+    // Bind to port (both server and client need to bind for recv/send)
     return new Promise((resolve, reject) => {
       this.socket.once('ready', resolve);
       this.socket.once('error', reject);
@@ -357,7 +407,8 @@ export class UdpTransport implements Transport {
     }
 
     return new Promise((resolve, reject) => {
-      this.socket.send(data, 0, data.length, this.port, this.host, (err?: Error) => {
+      const destPort = this.isServer ? this.port : this.port;
+      this.socket.send(data, 0, data.length, destPort, this.host, (err?: Error) => {
         if (err) reject(err);
         else resolve();
       });
@@ -390,7 +441,7 @@ export class UdpTransport implements Transport {
         this.socket.removeListener('data', onData);
         this.socket.removeListener('error', onError);
         reject(new Error('UDP receive timeout'));
-      }, 2000);
+      }, 3000);
     });
   }
 
@@ -402,7 +453,27 @@ export class UdpTransport implements Transport {
   }
 
   isConnected(): boolean {
-    return this.connectedState && this.socket && !this.socket._handle;
+    return this.connectedState && this.socket && this.socket._handle;
+  }
+  
+  async waitForConnection(): Promise<void> {
+    if (!this.isServer) return;
+    // For UDP, we need to receive at least one message to confirm client is connected
+    return new Promise<void>((resolve, reject) => {
+      const onData = (data: Buffer) => {
+        this.socket.removeListener('data', onData);
+        this.socket.removeListener('error', onError);
+        resolve();
+      };
+      const onError = (err: Error) => {
+        this.socket.removeListener('data', onData);
+        this.socket.removeListener('error', onError);
+        reject(err);
+      };
+      this.socket.once('data', onData);
+      this.socket.once('error', onError);
+      setTimeout(() => reject(new Error('Connection wait timeout')), 5000);
+    });
   }
 }
 
