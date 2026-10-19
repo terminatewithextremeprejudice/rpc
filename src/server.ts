@@ -1,8 +1,8 @@
 // RPC Server Implementation
 // Handles incoming XDR-encoded RPC calls and dispatches them to handlers
 
-import { decode, encode, encodeCall, decodeCall, type XDRHeader, RpcConstants } from './shared/xdr';
-import { Transport, TcpTransport, UnixSocketTransport, UdpTransport } from './transport';
+import { decode, encode, encodeCall, decodeCall, type XDRHeader, RpcConstants } from './shared/xdr.ts';
+import { Transport, TcpTransport, UnixSocketTransport, UdpTransport } from './transport.ts';
 
 export interface RpcHandler {
   procedure: number;
@@ -49,6 +49,8 @@ export class RpcServer {
       throw new Error('RPC server already running');
     }
 
+console.log("start to listen");
+
     await this.transport.connect();
     
     // For server-mode transports, wait for client connection
@@ -72,6 +74,53 @@ export class RpcServer {
   }
 
   /**
+   * Process a single RPC request (for synchronous test coordination)
+   * Receives one message, processes it, and sends the response
+   */
+  async processSingleRequest(): Promise<void> {
+    if (!this.running) {
+      throw new Error('Server not started. Call start() first.');
+    }
+
+	console.log("process single request")
+
+    try {
+      // Receive full RPC message
+      let message = await this.transport.receive(1024);
+     
+	console.log(message)
+
+      if (message.length < 16) {
+        console.warn(`[RPC Server] Message too short: ${message.length} bytes`);
+        return;
+      }
+
+      // Decode the header
+      const header = decode(new Uint8Array(message.subarray(0, 16)));
+      
+      console.log(`[RPC Server] Received call: prog=${header.version}, type=${header.type}`);
+
+      // Process the request and send response
+      const response = await this.handleRequest(header, message);
+      
+      if (response) {
+        await this.transport.send(response);
+        // Give socket time to flush before next operation
+        await new Promise(r => setTimeout(r, 10));
+      }
+
+    } catch (error) {
+      console.error(`[RPC Server] Error processing request:`, error);
+      
+      // Check if transport is still connected
+      if (!this.transport.isConnected()) {
+        console.log(`[RPC Server] Transport disconnected, stopping`);
+        this.running = false;
+      }
+    }
+  }
+
+  /**
    * Process incoming requests in a loop
    * @param timeoutMs - Optional timeout for the request loop
    */
@@ -88,38 +137,7 @@ export class RpcServer {
         break;
       }
 
-      try {
-        // Receive the RPC call message (header + arguments)
-        // First, receive just the header to determine message size
-        const headerSize = 16 + 20; // Basic header + call header = 36 bytes minimum
-        const message = await this.transport.receive(headerSize);
-
-        if (message.length < 16) {
-          console.warn(`[RPC Server] Message too short: ${message.length} bytes`);
-          continue;
-        }
-
-        // Decode the header
-        const header = decode(new Uint8Array(message.subarray(0, 16)));
-        
-        console.log(`[RPC Server] Received call: prog=${header.version}, type=${header.type}`);
-
-        // Process the request and send response
-        const response = await this.handleRequest(header, message);
-        
-        if (response) {
-          await this.transport.send(response);
-        }
-
-      } catch (error) {
-        console.error(`[RPC Server] Error processing request:`, error);
-        
-        // Check if transport is still connected
-        if (!this.transport.isConnected()) {
-          console.log(`[RPC Server] Transport disconnected, stopping`);
-          break;
-        }
-      }
+      await this.processSingleRequest();
     }
   }
 
@@ -135,11 +153,25 @@ export class RpcServer {
       return this.buildErrorMessage(RpcConstants.ReplyStates.RPC_GARBAGE);
     }
 
-    // Decode call arguments (bytes after the call header)
-    const callHeaderOffset = 16 + 20; // Basic header (16) + call header (20)
-    const callArgs = message.subarray(callHeaderOffset);
+    // Decode call header (20 bytes after basic header)
+    const callHeaderOffset = 16;
+    const callArgsOffset = 36;
+    
+    // Extract message ID from the call (XDR-encoded string after call header)
+    let msgId: string | undefined;
+    if (message.length > callArgsOffset) {
+      const msgIdLen = new DataView(message.buffer, message.byteOffset + callArgsOffset, 4).getUint32(0, false);
+      if (msgIdLen > 0 && message.length >= callArgsOffset + 4 + msgIdLen) {
+        const msgIdBytes = message.subarray(callArgsOffset + 4, callArgsOffset + 4 + msgIdLen);
+        msgId = new TextDecoder().decode(msgIdBytes).trim();
+      }
+    }
 
-    console.log(`[RPC Server] Call: prog=${header.version}, authType=${header.authType}, args=${callArgs.length} bytes`);
+    // Decode call arguments (bytes after the msgId)
+    const argsStart = msgId ? callArgsOffset + 4 + msgId.length + (4 - (msgId.length % 4)) % 4 : callArgsOffset;
+    const callArgs = message.subarray(argsStart);
+
+    console.log(`[RPC Server] Received call: prog=${header.version}, type=${header.type}, ${msgId ? `msgId=${msgId}, ` : ''}args=${callArgs.length} bytes`);
 
     // Build response based on call type
     if (header.type !== RpcConstants.CallTypes.RPC_CALL) {
@@ -150,14 +182,18 @@ export class RpcServer {
     // In real use, you'd decode callArgs and call registered handlers
     const resultData = callArgs; // Echo the arguments back
 
-    // Build proper RPC reply
-    return this.buildReply(header.version, RpcConstants.ReplyStates.RPC_ACCEPTED, resultData);
+    // Build proper RPC reply with message ID
+    return this.buildReply(header.version, RpcConstants.ReplyStates.RPC_ACCEPTED, resultData, msgId);
   }
 
   /**
    * Build a successful RPC reply
+   * @param version - RPC version
+   * @param status - Reply state (RPC_ACCEPTED, RPC_GARBAGE, etc.)
+   * @param resultData - Result data to include
+   * @param msgId - Optional message ID to echo back for async matching
    */
-  private buildReply(version: number, status: number, resultData: Uint8Array): Uint8Array {
+  private buildReply(version: number, status: number, resultData: Uint8Array, msgId?: string): Uint8Array {
     const replyHeader: XDRHeader = {
       version,
       type: RpcConstants.CallTypes.RPC_REPLY,
@@ -175,6 +211,11 @@ export class RpcServer {
     const chunks: Uint8Array[] = [];
     chunks.push(encode(replyHeader));
     chunks.push(new Uint8Array(replyCallHeader.subarray(0, 20))); // Only first 4 fields
+    
+    // Include message ID if provided
+    if (msgId) {
+      chunks.push(encodeString(msgId));
+    }
     
     chunks.push(this.encodeOpaque(resultData));
 

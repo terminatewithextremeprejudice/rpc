@@ -20,7 +20,7 @@ export {
   decodeHyper,
   RpcConstants,
   type XDRHeader
-} from './shared/xdr';
+} from './shared/xdr.ts';
 
 export { 
   Transport,
@@ -29,26 +29,26 @@ export {
   UnixSocketTransport,
   SharedMemoryTransport,
   TransportFactory
-} from './transport';
+} from './transport.ts';
 
 export { 
   RpcClient,
   createTcpClient,
   createUnixClient,
   createHttpClient
-} from './client';
+} from './client.ts';
 
 export type {
   RpcCallResult
-} from './client';
+} from './client.ts';
 
 export { 
   RpcServer,
   startRpcServer,
   startUnixRpcServer
-} from './server';
+} from './server.ts';
 
 export type {
   RpcHandler,
   RpcServerOptions
-} from './server';
+} from './server.ts';

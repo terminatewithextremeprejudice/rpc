@@ -108,6 +108,7 @@ export class TcpTransport implements Transport {
         if (received >= bufferSize) {
           this.socket.removeListener('data', onData);
           this.socket.removeListener('error', onError);
+          clearTimeout(timeoutHandle);
           resolve(new Uint8Array(Buffer.concat(chunks, bufferSize)));
         }
       };
@@ -115,11 +116,23 @@ export class TcpTransport implements Transport {
       const onError = (err: Error) => {
         this.socket.removeListener('data', onData);
         this.socket.removeListener('error', onError);
+        clearTimeout(timeoutHandle);
         reject(err);
       };
 
       this.socket.on('data', onData);
       this.socket.once('error', onError);
+
+      // Timeout - if we have any data, return it; otherwise reject
+      const timeoutHandle = setTimeout(() => {
+        this.socket.removeListener('data', onData);
+        this.socket.removeListener('error', onError);
+        if (chunks.length > 0) {
+          resolve(new Uint8Array(Buffer.concat(chunks)));
+        } else {
+          reject(new Error('TCP receive timeout'));
+        }
+      }, 1000);
     });
   }
 
@@ -145,7 +158,7 @@ export class TcpTransport implements Transport {
         resolve();
       } else {
         this.server.once('connection', () => resolve());
-        setTimeout(() => reject(new Error('Connection wait timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection wait timeout')), 15000);
       }
     });
   }
@@ -308,7 +321,7 @@ export class UnixSocketTransport implements Transport {
         resolve();
       } else {
         this.server.once('connection', () => resolve());
-        setTimeout(() => reject(new Error('Connection wait timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection wait timeout')), 15000);
       }
     });
   }

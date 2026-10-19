@@ -1,10 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
-    "moduleResolution": "Node",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "lib": ["ES2022"],
-    "rootDir": "src",
+    "rootDir": ".",
     "outDir": "dist",
     "declaration": true,
     "declarationMap": true,
@@ -15,8 +15,10 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true
   },
-  "include": ["src"],
-  "exclude": ["node_modules", "dist", "tests"]
+  "include": ["src", "tests"],
+  "exclude": ["node_modules", "dist"]
 }
