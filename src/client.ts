@@ -110,8 +110,8 @@ export class RpcClient {
     );
 
     // Append message ID to the call header (XDR-encoded string)
-    const encodedMsgId = encodeString(callMsgId);
-    
+    const encodedMsgId = encodeString(callMsgId as string);
+
     // Append arguments as opaque data
     const encodedArgs = this.encodeOpaqueArgs(args);
     
@@ -127,7 +127,7 @@ export class RpcClient {
 
     if (useAsync) {
       // Fire-and-forget: return handle immediately
-      return { _async: true, msgId: callMsgId, proc };
+      return { _async: true, msgId: callMsgId, proc } as AsyncRpcHandle;
     }
 
     // Wait for response with timeout
@@ -289,7 +289,7 @@ export class RpcClient {
   /**
    * Generate a unique message ID
    */
-  private generateMsgId(): string {
+  private generateMsgId(): string|undefined {
     return crypto.randomUUID().split('-')[0]; // Short UUID (first 8 hex chars)
   }
 
@@ -347,14 +347,14 @@ export class RpcClient {
    */
   async callWithString(proc: number, arg: string): Promise<RpcCallResult> {
     const encodedArg = encodeString(arg);
-    return this.call(proc, encodedArg);
+    return this.call(proc, encodedArg) as Promise<RpcCallResult>;
   }
 
   /**
    * Call with opaque bytes argument
    */
   async callWithBytes(proc: number, arg: Uint8Array): Promise<RpcCallResult> {
-    return this.call(proc, arg);
+    return this.call(proc, arg) as Promise<RpcCallResult>;
   }
 
   /**
