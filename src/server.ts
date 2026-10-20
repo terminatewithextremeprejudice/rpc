@@ -23,7 +23,7 @@ export interface RpcServerOptions {
 export interface QueuedRequest {
   proc: number;
   args: Uint8Array;
-  msgId: string | undefined;
+  msgId: string; // Always has a value - either provided or auto-generated
 }
 
 export class RpcServer {
@@ -54,18 +54,21 @@ export class RpcServer {
 
   /**
    * Start the server and begin listening for requests
+   * @param waitForConnection - Whether to wait for first client connection (default: true)
    */
-  async start(): Promise<void> {
+  async start(waitForConnection: boolean = true): Promise<void> {
     if (this.running) {
       throw new Error('RPC server already running');
     }
 
-console.log("start to listen");
+    console.log("start to listen");
 
     await this.transport.connect();
     
-    // For server-mode transports, wait for client connection
-    await (this.transport as any).waitForConnection?.();
+    // For server-mode transports, wait for client connection (optional)
+    if (waitForConnection) {
+      await (this.transport as any).waitForConnection?.();
+    }
     
     this.running = true;
     console.log(`[RPC Server] Started, transport connected`);
@@ -153,25 +156,27 @@ console.log("start to listen");
       // Decode the header
       const header = decode(new Uint8Array(message.subarray(0, 16)));
       
-      // Extract proc from call header at offset 16
-      // Call header format from encodeCall: prognum(4) + vers(4) + proc(4) + reserved(4) + authHeader(16) = 32 bytes
-      const callHeader = new DataView(message.buffer, message.byteOffset + 16, 32);
+      // Extract proc from call header at offset 16 (after basic header)
+      // Call header format: prognum(4) + vers(4) + proc(4) + reserved(4) + authHeader(16) = 20 bytes total
+      const callHeader = new DataView(message.buffer, message.byteOffset + 16, 20);
       const proc = callHeader.getUint32(8, false);  // proc is at offset 8 within call header
       
-      // Extract msgId if present (after call header, at offset 16 + 32 = 48)
+      // Extract msgId if present (after call header, at offset 16 + 20 = 36)
       let msgId: string | undefined;
       let msgIdLen: number = 0;
-      const callHeaderOffset = 48; // After 16-byte header + 32-byte call header
-      if (message.length > callHeaderOffset) {
+      const callHeaderOffset = 36; // After 16-byte base header + 20-byte call header
+      if (message.length > callHeaderOffset + 4) {
         msgIdLen = new DataView(message.buffer, message.byteOffset + callHeaderOffset, 4).getUint32(0, false);
         if (msgIdLen > 0 && message.length >= callHeaderOffset + 4 + msgIdLen) {
           const msgIdBytes = message.subarray(callHeaderOffset + 4, callHeaderOffset + 4 + msgIdLen);
-          msgId = new TextDecoder().decode(msgIdBytes).trim();
+          // Decode and strip null terminator + padding
+          msgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
         }
       }
       
-      // Extract arguments (after msgId)
-      const argsStart = msgId ? callHeaderOffset + 4 + msgIdLen + ((4 - (msgIdLen % 4)) % 4) : callHeaderOffset;
+      // Extract arguments (after msgId with its padding)
+      const msgIdPaddedLen = msgIdLen + ((4 - (msgIdLen % 4)) % 4);
+      const argsStart = msgIdLen > 0 ? callHeaderOffset + 4 + msgIdPaddedLen : callHeaderOffset;
       const args = message.subarray(argsStart);
 
       console.log(`[RPC Server] Queued incoming: proc=${proc}, ${msgId ? `msgId=${msgId}, ` : ''}args=${args.length} bytes`);
@@ -223,21 +228,23 @@ console.log("start to listen");
     }
 
     // Decode call header (20 bytes after basic header)
-    const callHeaderOffset = 16;
-    const callArgsOffset = 36;
+    const callHeaderOffset = 16 + 20; // msgId comes after 20-byte call header = offset 36
     
     // Extract message ID from the call (XDR-encoded string after call header)
     let msgId: string | undefined;
-    if (message.length > callArgsOffset) {
-      const msgIdLen = new DataView(message.buffer, message.byteOffset + callArgsOffset, 4).getUint32(0, false);
-      if (msgIdLen > 0 && message.length >= callArgsOffset + 4 + msgIdLen) {
-        const msgIdBytes = message.subarray(callArgsOffset + 4, callArgsOffset + 4 + msgIdLen);
-        msgId = new TextDecoder().decode(msgIdBytes).trim();
+    let msgIdLen = 0;
+    if (message.length > callHeaderOffset + 4) {
+      msgIdLen = new DataView(message.buffer, message.byteOffset + callHeaderOffset, 4).getUint32(0, false);
+      if (msgIdLen > 0 && message.length >= callHeaderOffset + 4 + msgIdLen) {
+        const msgIdBytes = message.subarray(callHeaderOffset + 4, callHeaderOffset + 4 + msgIdLen);
+        // Decode and strip null terminator + padding
+        msgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
       }
     }
-
+    
     // Decode call arguments (bytes after the msgId)
-    const argsStart = msgId ? callArgsOffset + 4 + msgId.length + (4 - (msgId.length % 4)) % 4 : callArgsOffset;
+    const msgIdPaddedLen = msgIdLen + ((4 - (msgIdLen % 4)) % 4);
+    const argsStart = msgIdLen > 0 ? callHeaderOffset + 4 + msgIdPaddedLen : callHeaderOffset;
     const callArgs = message.subarray(argsStart);
 
     console.log(`[RPC Server] Received call: prog=${header.version}, type=${header.type}, ${msgId ? `msgId=${msgId}, ` : ''}args=${callArgs.length} bytes`);
@@ -338,7 +345,7 @@ console.log("start to listen");
    * Returns immediately, handler can process later
    */
   async queueRequest(proc: number, args: Uint8Array, msgId?: string): Promise<string> {
-    const requestId = msgId || crypto.randomUUID().split('-')[0];
+    const requestId: string = msgId ?? crypto.randomUUID().split('-')[0]!;
     
     this.pendingRequests.set(requestId, { proc, args, msgId: requestId });
     console.log(`[RPC Server] Queued request: proc=${proc}, msgId=${requestId}, args=${args.length} bytes`);
