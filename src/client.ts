@@ -2,7 +2,7 @@
 // Encodes RPC calls and sends them through the configured transport
 
 import { encode, decode, encodeCall, encodeString, type XDRHeader, RpcConstants } from './shared/xdr.ts';
-import { Transport, TcpTransport, UnixSocketTransport, HttpTransport } from './transport.ts';
+import { Transport, TcpTransport } from './transport.ts';
 
 export interface RpcClientOptions {
   transport: Transport;
@@ -382,34 +382,6 @@ export async function createTcpClient(
   port: number = 5000
 ): Promise<RpcClient> {
   const transport = new TcpTransport(host, port);
-  const client = new RpcClient(prognum, vers, { transport });
-  await client.connect();
-  return client;
-}
-
-/**
- * Convenience function to create a Unix socket RPC client
- */
-export async function createUnixClient(
-  prognum: number,
-  vers: number,
-  socketPath: string = '/tmp/rpc.sock'
-): Promise<RpcClient> {
-  const transport = new UnixSocketTransport(socketPath);
-  const client = new RpcClient(prognum, vers, { transport });
-  await client.connect();
-  return client;
-}
-
-/**
- * Convenience function to create an HTTP-based RPC client
- */
-export async function createHttpClient(
-  prognum: number,
-  vers: number,
-  url: string
-): Promise<RpcClient> {
-  const transport = new HttpTransport(url);
   const client = new RpcClient(prognum, vers, { transport });
   await client.connect();
   return client;

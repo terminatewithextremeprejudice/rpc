@@ -24,18 +24,12 @@ export {
 
 export { 
   Transport,
-  TcpTransport,
-  UdpTransport,
-  UnixSocketTransport,
-  SharedMemoryTransport,
-  TransportFactory
+  TcpTransport
 } from './transport.ts';
 
 export { 
   RpcClient,
-  createTcpClient,
-  createUnixClient,
-  createHttpClient
+  createTcpClient
 } from './client.ts';
 
 export type {
@@ -44,8 +38,7 @@ export type {
 
 export { 
   RpcServer,
-  startRpcServer,
-  startUnixRpcServer
+  startRpcServer
 } from './server.ts';
 
 export type {

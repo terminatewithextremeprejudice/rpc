@@ -2,7 +2,7 @@
 // Handles incoming XDR-encoded RPC calls and dispatches them to handlers
 
 import { decode, encode, encodeCall, decodeCall, encodeString, type XDRHeader, RpcConstants } from './shared/xdr.ts';
-import { Transport, TcpTransport, UnixSocketTransport, UdpTransport } from './transport.ts';
+import { Transport, TcpTransport } from './transport.ts';
 
 export interface RpcHandler {
   procedure: number;
@@ -506,14 +506,3 @@ export async function startRpcServer(
   return server;
 }
 
-/**
- * Convenience function to start a Unix socket-based RPC server
- */
-export async function startUnixRpcServer(
-  socketPath: string = '/tmp/rpc.sock'
-): Promise<RpcServer> {
-  const transport = new UnixSocketTransport(socketPath);
-  const server = new RpcServer({ transport });
-  await server.start();
-  return server;
-}
