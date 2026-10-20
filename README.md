@@ -104,11 +104,6 @@ Client matches: Each response.msgId → original request handle
   }
 
   console.log('\n=== SUCCESS ===');
-  console.log('Key insight:');
-  console.log('- Server processed request B BEFORE request A (reverse order)');
-  console.log('- Both responses were sent back with their msgId tags');
-  console.log('- Client received both and matched them correctly to original requests');
-  console.log('- Non-blocking RPC with out-of-order processing works!');
 
   await client.disconnect();
   await server.stop();
