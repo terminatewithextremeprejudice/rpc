@@ -45,6 +45,7 @@ export class TcpTransport implements Transport {
   private port: number;
   private connected: boolean = false;
   private isServer: boolean;
+  private receiveBuffer: Uint8Array = new Uint8Array(0); // Buffer for pipelined messages
 
   constructor(host: string = '127.0.0.1', port: number = 5000, isServer: boolean = false) {
     this.host = host;
