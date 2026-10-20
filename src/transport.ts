@@ -1,5 +1,8 @@
 // Transport abstraction layer for RPC
 // Defines the interface that all transport implementations must satisfy
+// Includes message framing based on XDR header
+
+import { decode, RpcConstants } from './shared/xdr';
 
 export abstract class Transport {
   /**
@@ -98,42 +101,104 @@ export class TcpTransport implements Transport {
       throw new Error('TCP transport not connected');
     }
 
-    const chunks: Uint8Array[] = [];
-    let received = 0;
+    const chunks: Uint8Array[] = []
+    const minHeaderBytes = 16 // Basic XDR header
 
     return new Promise<Uint8Array>((resolve, reject) => {
       const onData = (chunk: Buffer) => {
-        chunks.push(Buffer.from(chunk));
-        received += chunk.length;
-        if (received >= bufferSize) {
-          this.socket.removeListener('data', onData);
-          this.socket.removeListener('error', onError);
-          clearTimeout(timeoutHandle);
-          resolve(new Uint8Array(Buffer.concat(chunks, bufferSize)));
-        }
-      };
+        chunks.push(Buffer.from(chunk))
+      }
 
       const onError = (err: Error) => {
-        this.socket.removeListener('data', onData);
-        this.socket.removeListener('error', onError);
-        clearTimeout(timeoutHandle);
-        reject(err);
-      };
+        this.socket.removeListener('data', onData)
+        this.socket.removeListener('error', onError)
+        clearTimeout(timeoutHandle)
+        reject(err)
+      }
 
-      this.socket.on('data', onData);
-      this.socket.once('error', onError);
+      this.socket.on('data', onData)
+      this.socket.once('error', onError)
 
-      // Timeout - if we have any data, return it; otherwise reject
       const timeoutHandle = setTimeout(() => {
-        this.socket.removeListener('data', onData);
-        this.socket.removeListener('error', onError);
+        this.socket.removeListener('data', onData)
+        this.socket.removeListener('error', onError)
         if (chunks.length > 0) {
-          resolve(new Uint8Array(Buffer.concat(chunks)));
+          const data = Buffer.concat(chunks)
+          if (data.length >= minHeaderBytes) {
+            // Parse header to extract headerLength field
+            try {
+              const header = decode(new Uint8Array(data.subarray(0, 16)))
+              // headerLength indicates call header size. For RPC_CALL/RPC_REPLY it's typically fixed.
+              // We need to calculate total message size from call header
+              // Call header structure: prognum(4) + vers(4) + proc(4) + reserved(4) + auth_header(16) = 32 bytes
+              // Total = header(16) + call_header(32) + msgid(optional) + args
+              
+              // For simplicity, we'll extract one complete RPC message
+              // Check if we have at least header + call header
+              if (data.length >= 48) {  // 16 + 32
+                // Extract call header fields to find auth_type which tells us if there's more data
+                const callHeaderView = new DataView(data.buffer, data.byteOffset + 16)
+                const authType = callHeaderView.getUint32(28, false) // auth type is at offset 28 within call header block
+                
+                // For now, extract based on message type:
+                // If it's a call, look for msgId field at offset 48+
+                if (header.type === RpcConstants.CallTypes.RPC_CALL) {
+                  const msgIdOffset = 48
+                  if (data.length > msgIdOffset + 4) {
+                    const msgIdLen = new DataView(data.buffer, data.byteOffset + msgIdOffset, 4).getUint32(0, false)
+                    // XDR string stores padded length (including null terminator) in length field
+                    // msgId field total size = 4 (length field) + msgIdLen (padded content size)
+                    const msgIdField = 4 + msgIdLen
+                    console.log(`[TCP Transport] msgIdLen=${msgIdLen}, msgIdField=${msgIdField}, data.len=${data.length}`)
+                    
+                    const argsOffset = msgIdOffset + msgIdField
+                    console.log(`[TCP Transport] argsOffset=${argsOffset}`)
+                    
+                    if (data.length >= argsOffset + 4) {
+                      const argsLen = new DataView(data.buffer, data.byteOffset + argsOffset, 4).getUint32(0, false)
+                      const argsPadded = Math.ceil(argsLen / 4) * 4
+                      const messageTotal = 16 + 32 + msgIdField + 4 + argsPadded
+                      console.log(`[TCP Transport] argsLen=${argsLen}, argsPadded=${argsPadded}, total=${messageTotal}, have=${data.length}`)
+                      
+                      if (data.length >= messageTotal) {
+                        const message = new Uint8Array(data.subarray(0, messageTotal))
+                        const remaining = data.subarray(messageTotal)
+                        if (remaining.length > 0) {
+                          console.log(`[TCP Transport] Split: extracted ${messageTotal}, remaining ${remaining.length}`)
+                          this.socket.unshift(remaining)
+                        }
+                        resolve(message)
+                        return
+                      }
+                    }
+                    // Not complete, wait more
+                  }
+                }
+              }
+              
+              // If complete, return the message; otherwise wait for more data
+              if (data.length >= 48) {
+                // Return what we have if it looks like a reasonable message
+                resolve(new Uint8Array(data))
+              } else {
+                // Not enough data yet, continue waiting
+                timeoutHandle.refresh()
+              }
+            } catch (e) {
+              // If parsing fails but we have data, return it
+              if (data.length >= 16) {
+                resolve(new Uint8Array(data))
+              }
+            }
+          } else {
+            // Don't have full header yet, wait more
+            timeoutHandle.refresh()
+          }
         } else {
-          reject(new Error('TCP receive timeout'));
+          reject(new Error('TCP receive timeout'))
         }
-      }, 1000);
-    });
+      }, 1000)
+    })
   }
 
   async close(): Promise<void> {
