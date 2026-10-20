@@ -160,9 +160,10 @@ console.log("start to listen");
       
       // Extract msgId if present (after call header, at offset 16 + 32 = 48)
       let msgId: string | undefined;
+      let msgIdLen: number = 0;
       const callHeaderOffset = 48; // After 16-byte header + 32-byte call header
       if (message.length > callHeaderOffset) {
-        const msgIdLen = new DataView(message.buffer, message.byteOffset + callHeaderOffset, 4).getUint32(0, false);
+        msgIdLen = new DataView(message.buffer, message.byteOffset + callHeaderOffset, 4).getUint32(0, false);
         if (msgIdLen > 0 && message.length >= callHeaderOffset + 4 + msgIdLen) {
           const msgIdBytes = message.subarray(callHeaderOffset + 4, callHeaderOffset + 4 + msgIdLen);
           msgId = new TextDecoder().decode(msgIdBytes).trim();
