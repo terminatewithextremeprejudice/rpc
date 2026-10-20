@@ -179,7 +179,7 @@ export class RpcClient {
   async collectResponses(timeout: number = 1000): Promise<Map<string, RpcCallResult>> {
     const results = new Map<string, RpcCallResult>();
 
-    // First, check in-memory cache
+    // First, check in-memory cache for already-received responses
     for (const [msgId, responseBuffer] of this.pendingResponses) {
       results.set(msgId, this.decodeResponse(new Uint8Array(responseBuffer), msgId));
       this.pendingResponses.delete(msgId);
@@ -187,46 +187,27 @@ export class RpcClient {
 
     // Then poll the transport for any new responses
     const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
+    while (Date.now() < deadline && this.pendingRequests?.size !== this.pendingResponses.size) {
+      // Use transport's receive() which properly extracts complete messages
       try {
-        // Try to receive with short timeout
-        const chunk = await new Promise<Buffer>((resolve) => {
-          const transport = this.getTransport() as any;
-          if (transport.socket && transport.socket.on) {
-            const onData = (data: Buffer) => {
-              transport.socket.removeListener('data', onData);
-              resolve(data);
-            };
-            transport.socket.once('data', onData);
-            setTimeout(() => resolve(Buffer.alloc(0)), 100);
-          } else {
-            setTimeout(() => resolve(Buffer.alloc(0)), 100);
-          }
-        });
-
-        if (chunk.length > 0) {
-          const response = new Uint8Array(chunk);
-          const header = decode(response.subarray(0, 16));
-          // Extract msgId from response if present (after call header: 16 + 20 = 36)
-          let msgIdLen = 0;
-          let msgId: string | undefined;
-          if (response.length > 36 + 4) {
-            msgIdLen = new DataView(response.buffer, response.byteOffset + 36, 4).getUint32(0, false);
-            if (msgIdLen > 0 && response.length >= 40 + msgIdLen) {
-              const msgIdBytes = response.subarray(40, 40 + msgIdLen);
-              msgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
-            }
-          }
-          if (msgId && !results.has(msgId)) {
-            this.pendingResponses.set(msgId, chunk);
-            results.set(msgId, this.decodeResponse(response, msgId));
-            this.pendingResponses.delete(msgId);
-          }
+        const transport = this.getTransport();
+        const response = await transport.receive(2048);
+        
+        const result = this.decodeResponse(response);
+        if (result.msgId && !results.has(result.msgId)) {
+          results.set(result.msgId, result);
+        } else if (result.msgId) {
+          // Cache for potential future collection
+          this.pendingResponses.set(result.msgId, Buffer.from(response));
         }
-      } catch (err) {
-        // No data available, continue polling
+      } catch (err: any) {
+        // timeout or error - no more data available right now
+        if (err.message?.includes('timeout')) {
+          break;
+        }
       }
-      if (Date.now() >= deadline) break;
+      // Small yield to prevent busy loop
+      await new Promise(r => setTimeout(r, 10));
     }
 
     return results;
