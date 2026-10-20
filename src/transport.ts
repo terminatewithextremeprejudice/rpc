@@ -118,15 +118,20 @@ export class TcpTransport implements Transport {
    * Check if we have a complete message in the buffer and notify waiters
    */
   private checkAndDispatch(): void {
-    // Try to extract a complete message from the buffer
-    const message = this.tryParseCompleteMessage();
-    if (message) {
-      // Notify any listeners that are waiting for data
-      for (const listener of this.bufferListeners) {
-        listener(message);
+    // Loop while we have complete messages in the buffer
+    while (true) {
+      const message = this.tryParseCompleteMessage();
+      if (message) {
+        // Notify any listeners that are waiting for data
+        for (const listener of this.bufferListeners) {
+          listener(message);
+        }
+        // Clear the listeners since we're dispatching synchronously
+        this.bufferListeners = [];
+        // Continue the loop to check for more complete messages
+      } else {
+        break;
       }
-      // Clear the listeners since we're dispatching synchronously
-      this.bufferListeners = [];
     }
   }
 
@@ -147,14 +152,14 @@ export class TcpTransport implements Transport {
       // Parse the header
       const header = decode(new Uint8Array(data.subarray(0, 16)));
       
-      // Check if we have at least header + call header (48 bytes total)
-      if (data.length < 48) {
+      // Check if we have at least header + call header (16 + 20 = 36 bytes total)
+      if (data.length < 36) {
         return null;
       }
 
       // For RPC calls, we need to calculate full message size
       if (header.type === RpcConstants.CallTypes.RPC_CALL) {
-        const msgIdOffset = 48;
+        const msgIdOffset = 36;  // After 16-byte header + 20-byte call header
         if (data.length <= msgIdOffset + 4) {
           return null;
         }
@@ -169,7 +174,7 @@ export class TcpTransport implements Transport {
 
         const argsLen = new DataView(data.buffer, data.byteOffset + argsOffset, 4).getUint32(0, false);
         const argsPadded = Math.ceil(argsLen / 4) * 4;
-        const messageTotal = 16 + 32 + msgIdField + 4 + argsPadded;
+        const messageTotal = 16 + 20 + msgIdField + 4 + argsPadded;
 
         if (data.length < messageTotal) {
           return null; // Incomplete message, need more data
@@ -183,8 +188,34 @@ export class TcpTransport implements Transport {
         return message;
       }
 
-      // For replies or other message types, try to parse what we have
-      // If we have a complete header, assume the message is ready
+      // For replies (RPC_REPLY), extract complete reply
+      // Reply: header(16) + callHeader(16) + optional msgId + result
+      if (header.type === RpcConstants.CallTypes.RPC_REPLY) {
+        // Check if we have header + at least some call header
+        if (data.length < 32) {
+          return null;
+        }
+        // Reply callHeader is 20 bytes but we only need first 16 for status
+        // Check if msgId is present (after call header offset = 32)
+        let replySize = 32;
+        if (data.length > 32 + 4) {
+          const msgIdLen = new DataView(data.buffer, data.byteOffset + 32, 4).getUint32(0, false);
+          if (msgIdLen > 0) {
+            const msgIdPadded = 4 + msgIdLen + ((4 - (msgIdLen % 4)) % 4);
+            replySize += msgIdPadded;
+          }
+        }
+        // Add any remaining data as result
+        if (data.length >= replySize) {
+          const message = new Uint8Array(data.subarray(0, data.length));
+          this.receiveBuffer = new Uint8Array(0);
+          console.log(`[TCP Transport] Extracted reply: ${message.length} bytes`);
+          return message;
+        }
+        return null;
+      }
+
+      // For other message types, try to parse what we have
       if (data.length >= 16) {
         return new Uint8Array(data.subarray(0, 16));
       }

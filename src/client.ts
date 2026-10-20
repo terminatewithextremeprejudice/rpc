@@ -207,16 +207,20 @@ export class RpcClient {
         if (chunk.length > 0) {
           const response = new Uint8Array(chunk);
           const header = decode(response.subarray(0, 16));
-          // Extract msgId from response if present
-          if (response.length > 36) {
-            // Response has msgId after call header (16 + 20 = 36)
-            const msgIdBytes = response.subarray(36, Math.min(response.length, 40));
-            const msgId = new TextDecoder().decode(msgIdBytes).trim();
-            if (msgId && !results.has(msgId)) {
-              this.pendingResponses.set(msgId, chunk);
-              results.set(msgId, this.decodeResponse(response, msgId));
-              this.pendingResponses.delete(msgId);
+          // Extract msgId from response if present (after call header: 16 + 20 = 36)
+          let msgIdLen = 0;
+          let msgId: string | undefined;
+          if (response.length > 36 + 4) {
+            msgIdLen = new DataView(response.buffer, response.byteOffset + 36, 4).getUint32(0, false);
+            if (msgIdLen > 0 && response.length >= 40 + msgIdLen) {
+              const msgIdBytes = response.subarray(40, 40 + msgIdLen);
+              msgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
             }
+          }
+          if (msgId && !results.has(msgId)) {
+            this.pendingResponses.set(msgId, chunk);
+            results.set(msgId, this.decodeResponse(response, msgId));
+            this.pendingResponses.delete(msgId);
           }
         }
       } catch (err) {
@@ -260,11 +264,14 @@ export class RpcClient {
 
     // Extract msgId from response if present (after call header: 16 + 20 = 36)
     let responseMsgId: string | undefined;
-    if (response.length > 36) {
-      // Response has msgId after call header
-      const msgIdLength = new DataView(response.buffer, response.byteOffset + 36, 4).getUint32(0, false);
-      const msgIdBytes = response.subarray(40, 40 + msgIdLength);
-      responseMsgId = new TextDecoder().decode(msgIdBytes).trim();
+    let msgIdLen = 0;
+    if (response.length > 36 + 4) {
+      msgIdLen = new DataView(response.buffer, response.byteOffset + 36, 4).getUint32(0, false);
+      if (msgIdLen > 0 && response.length >= 40 + msgIdLen) {
+        const msgIdBytes = response.subarray(40, 40 + msgIdLen);
+        // Decode and strip null terminator + padding
+        responseMsgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
+      }
     }
 
     if (expectedMsgId && responseMsgId && responseMsgId !== expectedMsgId) {
