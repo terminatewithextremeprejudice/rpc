@@ -1,7 +1,7 @@
 // RPC Server Implementation
 // Handles incoming XDR-encoded RPC calls and dispatches them to handlers
 
-import { decode, encode, encodeCall, decodeCall, type XDRHeader, RpcConstants } from './shared/xdr.ts';
+import { decode, encode, encodeCall, decodeCall, encodeString, type XDRHeader, RpcConstants } from './shared/xdr.ts';
 import { Transport, TcpTransport, UnixSocketTransport, UdpTransport } from './transport.ts';
 
 export interface RpcHandler {
@@ -20,11 +20,22 @@ export interface RpcServerOptions {
   };
 }
 
+export interface QueuedRequest {
+  proc: number;
+  args: Uint8Array;
+  msgId: string | undefined;
+}
+
 export class RpcServer {
   private transport: Transport;
   private handlers: Map<string, RpcHandler> = new Map();
   private running: boolean = false;
   private handlerRegistry: Map<string, RpcHandler> = new Map();
+  
+  private pendingRequests = new Map<string, QueuedRequest>();
+  
+  // Buffered responses waiting to be sent
+  private responseBuffer = new Map<string, Uint8Array>();
 
   constructor(options: RpcServerOptions) {
     this.transport = options.transport;
@@ -117,6 +128,62 @@ console.log("start to listen");
         console.log(`[RPC Server] Transport disconnected, stopping`);
         this.running = false;
       }
+    }
+  }
+
+  /**
+   * Receive and queue a single RPC request without processing
+   * Use this for non-blocking mode - call queueAndProcess later to handle it
+   * @returns The msgId of the queued request, or undefined if receive failed
+   */
+  async queueIncomingRequest(): Promise<string | undefined> {
+    if (!this.running) {
+      throw new Error('Server not started. Call start() first.');
+    }
+
+    try {
+      // Receive full RPC message
+      const message = await this.transport.receive(1024);
+      
+      if (message.length < 16) {
+        console.warn(`[RPC Server] Message too short: ${message.length} bytes`);
+        return undefined;
+      }
+
+      // Decode the header
+      const header = decode(new Uint8Array(message.subarray(0, 16)));
+      
+      // Extract msgId if present
+      let msgId: string | undefined;
+      const callArgsOffset = 36;
+      if (message.length > callArgsOffset) {
+        const msgIdLen = new DataView(message.buffer, message.byteOffset + callArgsOffset, 4).getUint32(0, false);
+        if (msgIdLen > 0 && message.length >= callArgsOffset + 4 + msgIdLen) {
+          const msgIdBytes = message.subarray(callArgsOffset + 4, callArgsOffset + 4 + msgIdLen);
+          msgId = new TextDecoder().decode(msgIdBytes).trim();
+        }
+      }
+      
+      // Extract proc from call header
+      const callHeader = new DataView(message.buffer, message.byteOffset + 16, 20);
+      const proc = callHeader.getUint32(0, false);
+      
+      // Extract arguments
+      const argsStart = msgId ? callArgsOffset + 4 + msgId.length + (4 - (msgId.length % 4)) % 4 : callArgsOffset;
+      const args = message.subarray(argsStart);
+
+      console.log(`[RPC Server] Queued incoming: proc=${proc}, ${msgId ? `msgId=${msgId}, ` : ''}args=${args.length} bytes`);
+
+      // Queue the request
+      const requestId = await this.queueRequest(proc, args, msgId);
+      return requestId;
+
+    } catch (error) {
+      console.error(`[RPC Server] Error receiving request:`, error);
+      if (!this.transport.isConnected()) {
+        this.running = false;
+      }
+      return undefined;
     }
   }
 
@@ -262,6 +329,158 @@ console.log("start to listen");
    */
   isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Queue an RPC request for async processing
+   * Returns immediately, handler can process later
+   */
+  async queueRequest(proc: number, args: Uint8Array, msgId?: string): Promise<string> {
+    const requestId = msgId || crypto.randomUUID().split('-')[0];
+    
+    this.pendingRequests.set(requestId, { proc, args, msgId: requestId });
+    console.log(`[RPC Server] Queued request: proc=${proc}, msgId=${requestId}, args=${args.length} bytes`);
+    
+    return requestId;
+  }
+
+  /**
+   * Process a queued request and build response
+   * @param msgId - The message ID of the request to process
+   * @returns The response buffer, or undefined if no request with that msgId
+   */
+  async processQueuedRequest(msgId: string): Promise<Uint8Array | undefined> {
+    const request = this.pendingRequests.get(msgId);
+    if (!request) {
+      console.warn(`[RPC Server] No pending request found for msgId=${msgId}`);
+      return undefined;
+    }
+    
+    this.pendingRequests.delete(msgId);
+    console.log(`[RPC Server] Processing queued request: proc=${request.proc}, msgId=${msgId}`);
+    
+    // Build the response
+    const response = await this.buildResponseForRequest(request.proc, request.args, msgId);
+    
+    // Buffer the response for later sending
+    this.responseBuffer.set(msgId, response);
+    
+    return response;
+  }
+
+  /**
+   * Send all buffered responses in order
+   * @returns Number of responses sent
+   */
+  async flushResponses(): Promise<number> {
+    if (this.responseBuffer.size === 0) {
+      return 0;
+    }
+    
+    const sentCount = this.responseBuffer.size;
+    console.log(`[RPC Server] Flushing ${sentCount} buffered response(s)`);
+    
+    for (const [msgId, response] of this.responseBuffer) {
+      try {
+        await this.transport.send(response);
+        console.log(`[RPC Server] Sent response for msgId=${msgId}`);
+      } catch (error) {
+        console.error(`[RPC Server] Failed to send response for msgId=${msgId}:`, error);
+      }
+    }
+    
+    this.responseBuffer.clear();
+    return sentCount;
+  }
+
+  /**
+   * Send a specific buffered response by msgId
+   * @param msgId - The message ID of the response to send
+   * @returns true if sent, false if not found
+   */
+  async sendResponse(msgId: string): Promise<boolean> {
+    const response = this.responseBuffer.get(msgId);
+    if (!response) {
+      console.warn(`[RPC Server] No buffered response found for msgId=${msgId}`);
+      return false;
+    }
+    
+    this.responseBuffer.delete(msgId);
+    await this.transport.send(response);
+    console.log(`[RPC Server] Sent buffered response for msgId=${msgId}`);
+    return true;
+  }
+
+  /**
+   * Process all queued requests and send their buffered responses
+   * @param batchSize - Max number of requests to process per call (0 = all)
+   * @returns { processed: number, sent: number }
+   */
+  async processAndFlush(batchSize = 0): Promise<{ processed: number; sent: number }> {
+    let processed = 0;
+    const maxBatch = batchSize === 0 ? this.pendingRequests.size : batchSize;
+    
+    // Process queued requests
+    for (let i = 0; i < maxBatch && this.pendingRequests.size > 0; i++) {
+      const entry = this.pendingRequests.entries().next().value;
+      if (entry) {
+        const [msgId, { proc, args }] = entry;
+        await this.processQueuedRequest(msgId);
+        processed++;
+      }
+    }
+    
+    // Send buffered responses
+    let sent = 0;
+    for (const [msgId, response] of this.responseBuffer) {
+      try {
+        await this.transport.send(response);
+        console.log(`[RPC Server] Sent response for msgId=${msgId}`);
+        sent++;
+      } catch (error) {
+        console.error(`[RPC Server] Failed to send response for msgId=${msgId}:`, error);
+      }
+    }
+    this.responseBuffer.clear();
+    
+    return { processed, sent };
+  }
+
+  /**
+   * Get statistics about pending requests and buffered responses
+   */
+  getStats(): { pendingRequests: number; bufferedResponses: number } {
+    return {
+      pendingRequests: this.pendingRequests.size,
+      bufferedResponses: this.responseBuffer.size
+    };
+  }
+
+  /**
+   * Build a response for a request
+   * @param proc - Procedure number
+   * @param args - Request arguments
+   * @param msgId - Message ID to echo back
+   */
+  private async buildResponseForRequest(proc: number, args: Uint8Array, msgId: string | undefined): Promise<Uint8Array> {
+    // Look up the handler for this procedure
+    const key = `${proc}:2`; // Assuming version 2 for now
+    const handler = this.handlerRegistry.get(key);
+    
+    if (!handler) {
+      console.warn(`[RPC Server] No handler for proc=${proc}, returning RPC_PROCUNAV`);
+      return this.buildReply(2, RpcConstants.ReplyStates.SYSERR, new Uint8Array(0), msgId!);
+    }
+    
+    try {
+      // For now, echo back the arguments (simple demo)
+      // In real use: call handler.handler(decodedArgs)
+      const resultData = args;
+      return this.buildReply(2, RpcConstants.ReplyStates.RPC_ACCEPTED, resultData, msgId);
+    } catch (error) {
+      console.error(`[RPC Server] Handler error for proc=${proc}:`, error);
+      return this.buildReply(2, RpcConstants.ReplyStates.SYSERR, new Uint8Array(0), msgId!);
+    }
   }
 
   /**

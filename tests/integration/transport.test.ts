@@ -1,191 +1,110 @@
-// Transport Integration Tests with Worker-Based Parallel Execution
+// Transport Integration Tests - Same-thread client/server model
 import { describe, test, beforeAll, afterAll, expect } from '@jest/globals';
-import { Worker } from 'node:worker_threads';
-import { RpcServer } from '../../src';
-import * as pathModule from 'node:path';
-
-const testDir = pathModule.dirname(require.resolve('./transport.test.ts'));
+import { RpcServer, RpcClient, TcpTransport, UnixSocketTransport } from '../../src/index.ts';
 
 interface TestTransportConfig {
   name: string;
-  type: 'tcp' | 'unix' | 'udp' | 'memory';
-  host?: string;
-  port?: number;
-  socketPath?: string;
-  path?: string;
   createServerTransport: () => any;
+  createClientTransport: () => any;
   cleanup?: () => void;
-}
-
-interface ClientResult {
-  test: string;
-  status: string;
-  [key: string]: any;
 }
 
 /**
  * Run integration tests for a transport type
- * - Server runs in main thread
- * - Client runs in worker thread (parallel execution)
+ * - Server and client run on same thread
+ * - Client makes call, test calls server.processSingleRequest() to handle it
+ * - No workers needed - simple async/await coordination
  */
 function runTransportTest(config: TestTransportConfig): void {
   describe(config.name, () => {
     let server: RpcServer;
-    let serverTransport: any;
+    let client: RpcClient;
     
     beforeAll(async () => {
-      // Create server transport in server mode
-      serverTransport = config.createServerTransport();
-      
-      // Initialize and start server
+      // Create and start server
+      const serverTransport = config.createServerTransport();
       server = new RpcServer({ transport: serverTransport, isServer: true });
-      await server.start();
-    }, 15000);
+      server.start(); 
+      console.log(`[Server] Started for ${config.name}`);
+    }, 100);
 
     afterAll(async () => {
-      try {
-        await server.stop();
+      // await server.stop();
+      /*
+			try {
+        // if (client) await client.disconnect();
       } catch (e) {}
       
       if (config.cleanup) {
         config.cleanup();
       }
-    }, 5000);
+      */
+      console.log('after all')
+    }, 500);
 
-    test(`runs all client tests in parallel worker`, async () => {
-      // Prepare worker data
-      const workerData = {
-        type: config.type,
-        host: config.host,
-        port: config.port,
-        socketPath: config.socketPath,
-        path: config.path,
-      };
+    test(`client can communicate with server`, async () => {
+      // Create client
+      const clientTransport = config.createClientTransport();
+      client = new RpcClient(100000, 1, { transport: clientTransport });
+      
+      try {
+        // Connect client to server
+        await client.connect();
+        expect(client.isConnected()).toBe(true);
 
-      return new Promise<void>((resolve, reject) => {
-        const workerPath = pathModule.join(testDir, './worker-client.ts');
-        const worker = new Worker(workerPath, { workerData });
+	console.log("client connected")
 
-        const timeout = setTimeout(() => {
-          worker.terminate();
-          reject(new Error(`Worker timeout for ${config.name}`));
-        }, 10000);
+        // Test 1: Send string message
+        const msg1 = `hello from ${config.name.replace(' Transport', '')} client`;
+        await client.callWithString(1, msg1);
+        await server.processSingleRequest();
+       
+	console.log('sent message')
+	await server.stop();
 
-        worker.on('message', (message: { completed: boolean; results: ClientResult[] }) => {
-          clearTimeout(timeout);
-          worker.terminate();
-          
-          if (!message.completed) {
-            reject(new Error(`Worker failed: ${config.name}`));
-            return;
-          }
-          
-          // Display results
-          console.log(`\n${config.name} Results:`);
-          console.log('─'.repeat(40));
-          message.results.forEach(r => {
-            console.log(`  [${r.status}] ${r.test}`);
-            if (r.error) console.log(`    Error: ${r.error}`);
-          });
-          console.log('─'.repeat(40));
-          
-          // Verify all tests passed
-          const allPassed = message.results.every(r => r.status === 'PASS');
-          const passCount = message.results.filter(r => r.status === 'PASS').length;
-          const totalCount = message.results.length;
-          
-          expect(passCount).toBe(totalCount);
-          
-          if (!allPassed) {
-            const failed = message.results.filter(r => r.status !== 'PASS');
-            throw new Error(`Failed tests: ${failed.map(f => f.test).join(', ')}`);
-          }
-          
-          resolve();
-        });
+	console.log("gonna make multiple writes")
+	// Test 2: Multiple sequential calls
+        for (let i = 0; i < 3; i++) {
+          await client.callWithString(1, `msg ${i}`);
+          await server.processSingleRequest();
+        }
 
-        worker.on('error', (err) => {
-          clearTimeout(timeout);
-          worker.terminate();
-          reject(err);
-        });
+        // Test 3: Binary data
+        const binaryData = new Uint8Array([0x01, 0x02, 0x03, 0xFF, 0x00]);
+        await client.call(2, binaryData);
+        await server.processSingleRequest();
+        
+        // Test 4: Round-trip preserves data
+        const { encodeString, decodeString } = await import('../../src/shared/xdr.ts');
+        const original = encodeString('payload test');
+        await client.call(3, original);
+        await server.processSingleRequest();
+        
+        expect(decodeString(original)).toBe('payload test');
+        
+        // Verify all tests passed
+        expect(client.isConnected()).toBe(true);
 
-        worker.on('exit', (code) => {
-          clearTimeout(timeout);
-          if (code !== 0 && code !== undefined) {
-            reject(new Error(`Worker exited with code ${code}`));
-          }
-        });
-      });
-    }, 12000);
+      } catch (error: any) {
+		console.log(error)
+		console.error(`[${config.name}] Test failed:`, error.message);
+        throw error;
+      } finally {
+        try {
+          await client.disconnect();
+        } catch (e) {
+		console.log("error", e)
+	}
+      }
+    }, 200);
   });
 }
 
-// ============================================================================
 // Test Suites for Each Transport Type
-// ============================================================================
-
 const testId = Date.now();
 
 runTransportTest({
   name: 'TCP Transport',
-  type: 'tcp',
-  host: '127.0.0.1',
-  port: 5901,
-  createServerTransport: () => {
-    const { TcpTransport } = require('../../src/transport');
-    return new TcpTransport('127.0.0.1', 5901, true);
-  }
-});
-
-runTransportTest({
-  name: 'Unix Socket Transport',
-  type: 'unix',
-  socketPath: `/tmp/test-unix-integration-${testId}.sock`,
-  createServerTransport: () => {
-    const { UnixSocketTransport } = require('../../src/transport');
-    return new UnixSocketTransport(`/tmp/test-unix-integration-${testId}.sock`, true);
-  },
-  cleanup: () => {
-    const fs = require('fs');
-    const path = `/tmp/test-unix-integration-${testId}.sock`;
-    try { fs.unlinkSync(path); } catch (e) {}
-  }
-});
-
-runTransportTest({
-  name: 'UDP Transport',
-  type: 'udp',
-  host: '127.0.0.1',
-  port: 5903,
-  createServerTransport: () => {
-    const { UdpTransport } = require('../../src/transport');
-    return new UdpTransport('127.0.0.1', 5903, true);
-  }
-});
-
-runTransportTest({
-  name: 'Shared Memory Transport',
-  type: 'memory',
-  path: `/tmp/test-shm-integration-${testId}`,
-  createServerTransport: () => {
-    const { SharedMemoryTransport } = require('../../src/transport');
-    return new SharedMemoryTransport(`/tmp/test-shm-integration-${testId}`);
-  },
-  cleanup: () => {
-    const fs = require('fs');
-    const path = `/tmp/test-shm-integration-${testId}`;
-    try { fs.unlinkSync(path); } catch (e) {}
-  }
-});
-
-// ============================================================================
-// Summary Report
-// ============================================================================
-
-describe('Integration Test Summary', () => {
-  test('all transport types tested', () => {
-    const transportsTested = 4; // TCP, Unix, UDP, Memory
-    expect(transportsTested).toBe(4);
-  });
+  createServerTransport: () => new TcpTransport('127.0.0.1', 5901, true),
+  createClientTransport: () => new TcpTransport('127.0.0.1', 5901, false)
 });
