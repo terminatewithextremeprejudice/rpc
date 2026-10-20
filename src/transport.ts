@@ -45,7 +45,9 @@ export class TcpTransport implements Transport {
   private port: number;
   private connected: boolean = false;
   private isServer: boolean;
-  private receiveBuffer: Uint8Array = new Uint8Array(0); // Buffer for pipelined messages
+  private receiveBuffer: Uint8Array = new Uint8Array(0); // Persistent buffer for pipelined messages
+  private bufferListeners: Array<(data: Uint8Array) => void> = []; // Listeners for buffer-ready messages
+  private isBuffering: boolean = false; // Track if we're actively waiting for a receive() call
 
   constructor(host: string = '127.0.0.1', port: number = 5000, isServer: boolean = false) {
     this.host = host;
@@ -61,6 +63,17 @@ export class TcpTransport implements Transport {
       this.server = net.createServer((sock: any) => {
         this.socket = sock;
         this.connected = true;
+        
+        // Set up persistent data handler that accumulates into receiveBuffer
+        sock.on('data', (chunk: Buffer) => {
+          this.appendToBuffer(chunk);
+          this.checkAndDispatch();
+        });
+        
+        sock.on('error', (err: Error) => {
+          console.error(`[TCP Transport] Socket error:`, err);
+          this.connected = false;
+        });
       });
       
       return new Promise<void>((resolve, reject) => {
@@ -74,6 +87,12 @@ export class TcpTransport implements Transport {
       // Client mode: connect to server
       this.socket = net.createConnection({ host: this.host, port: this.port });
       
+      // Set up persistent data handler that accumulates into receiveBuffer
+      this.socket.on('data', (chunk: Buffer) => {
+        this.appendToBuffer(chunk);
+        this.checkAndDispatch();
+      });
+      
       await new Promise<void>((resolve, reject) => {
         this.socket.once('connect', () => {
           this.connected = true;
@@ -82,6 +101,103 @@ export class TcpTransport implements Transport {
         this.socket.once('error', (err: Error) => reject(err));
       });
     }
+  }
+
+  /**
+   * Append incoming data chunk to the persistent receive buffer
+   */
+  private appendToBuffer(chunk: Buffer): void {
+    const oldBuffer = this.receiveBuffer;
+    const newBuffer = new Uint8Array(oldBuffer.length + chunk.length);
+    newBuffer.set(oldBuffer, 0);
+    newBuffer.set(Buffer.from(chunk), oldBuffer.length);
+    this.receiveBuffer = newBuffer;
+  }
+
+  /**
+   * Check if we have a complete message in the buffer and notify waiters
+   */
+  private checkAndDispatch(): void {
+    // Try to extract a complete message from the buffer
+    const message = this.tryParseCompleteMessage();
+    if (message) {
+      // Notify any listeners that are waiting for data
+      for (const listener of this.bufferListeners) {
+        listener(message);
+      }
+      // Clear the listeners since we're dispatching synchronously
+      this.bufferListeners = [];
+    }
+  }
+
+  /**
+   * Try to parse a complete RPC message from the buffer
+   * Returns the message if complete, or null if we need more data
+   */
+  private tryParseCompleteMessage(): Uint8Array | null {
+    const data = this.receiveBuffer;
+    const minHeaderBytes = 16; // Basic XDR header
+
+    // Not enough for even the header
+    if (data.length < minHeaderBytes) {
+      return null;
+    }
+
+    try {
+      // Parse the header
+      const header = decode(new Uint8Array(data.subarray(0, 16)));
+      
+      // Check if we have at least header + call header (48 bytes total)
+      if (data.length < 48) {
+        return null;
+      }
+
+      // For RPC calls, we need to calculate full message size
+      if (header.type === RpcConstants.CallTypes.RPC_CALL) {
+        const msgIdOffset = 48;
+        if (data.length <= msgIdOffset + 4) {
+          return null;
+        }
+
+        const msgIdLen = new DataView(data.buffer, data.byteOffset + msgIdOffset, 4).getUint32(0, false);
+        const msgIdField = 4 + msgIdLen;
+        const argsOffset = msgIdOffset + msgIdField;
+
+        if (data.length < argsOffset + 4) {
+          return null;
+        }
+
+        const argsLen = new DataView(data.buffer, data.byteOffset + argsOffset, 4).getUint32(0, false);
+        const argsPadded = Math.ceil(argsLen / 4) * 4;
+        const messageTotal = 16 + 32 + msgIdField + 4 + argsPadded;
+
+        if (data.length < messageTotal) {
+          return null; // Incomplete message, need more data
+        }
+
+        // Extract the complete message and update buffer
+        const message = new Uint8Array(data.subarray(0, messageTotal));
+        this.receiveBuffer = new Uint8Array(data.subarray(messageTotal));
+        
+        console.log(`[TCP Transport] Extracted complete message: ${messageTotal} bytes, ${this.receiveBuffer.length} remaining in buffer`);
+        return message;
+      }
+
+      // For replies or other message types, try to parse what we have
+      // If we have a complete header, assume the message is ready
+      if (data.length >= 16) {
+        return new Uint8Array(data.subarray(0, 16));
+      }
+
+    } catch (e) {
+      // If parsing fails, we might have malformed data or incomplete header
+      console.warn(`[TCP Transport] Parse error:`, e);
+      if (data.length >= 16) {
+        return new Uint8Array(data.subarray(0, 16));
+      }
+    }
+
+    return null;
   }
 
   async send(data: Uint8Array): Promise<void> {
@@ -102,107 +218,43 @@ export class TcpTransport implements Transport {
       throw new Error('TCP transport not connected');
     }
 
-    const chunks: Uint8Array[] = []
-    const minHeaderBytes = 16 // Basic XDR header
+    // Check if we already have a complete message in the buffer
+    const cachedMessage = this.tryParseCompleteMessage();
+    if (cachedMessage) {
+      console.log(`[TCP Transport] Returning cached message from buffer: ${cachedMessage.length} bytes`);
+      return cachedMessage;
+    }
 
+    // No complete message ready, register a listener and wait
     return new Promise<Uint8Array>((resolve, reject) => {
-      const onData = (chunk: Buffer) => {
-        chunks.push(Buffer.from(chunk))
-      }
-
-      const onError = (err: Error) => {
-        this.socket.removeListener('data', onData)
-        this.socket.removeListener('error', onError)
-        clearTimeout(timeoutHandle)
-        reject(err)
-      }
-
-      this.socket.on('data', onData)
-      this.socket.once('error', onError)
-
       const timeoutHandle = setTimeout(() => {
-        this.socket.removeListener('data', onData)
-        this.socket.removeListener('error', onError)
-        if (chunks.length > 0) {
-          const data = Buffer.concat(chunks)
-          if (data.length >= minHeaderBytes) {
-            // Parse header to extract headerLength field
-            try {
-              const header = decode(new Uint8Array(data.subarray(0, 16)))
-              // headerLength indicates call header size. For RPC_CALL/RPC_REPLY it's typically fixed.
-              // We need to calculate total message size from call header
-              // Call header structure: prognum(4) + vers(4) + proc(4) + reserved(4) + auth_header(16) = 32 bytes
-              // Total = header(16) + call_header(32) + msgid(optional) + args
-              
-              // For simplicity, we'll extract one complete RPC message
-              // Check if we have at least header + call header
-              if (data.length >= 48) {  // 16 + 32
-                // Extract call header fields to find auth_type which tells us if there's more data
-                const callHeaderView = new DataView(data.buffer, data.byteOffset + 16)
-                const authType = callHeaderView.getUint32(28, false) // auth type is at offset 28 within call header block
-                
-                // For now, extract based on message type:
-                // If it's a call, look for msgId field at offset 48+
-                if (header.type === RpcConstants.CallTypes.RPC_CALL) {
-                  const msgIdOffset = 48
-                  if (data.length > msgIdOffset + 4) {
-                    const msgIdLen = new DataView(data.buffer, data.byteOffset + msgIdOffset, 4).getUint32(0, false)
-                    // XDR string stores padded length (including null terminator) in length field
-                    // msgId field total size = 4 (length field) + msgIdLen (padded content size)
-                    const msgIdField = 4 + msgIdLen
-                    console.log(`[TCP Transport] msgIdLen=${msgIdLen}, msgIdField=${msgIdField}, data.len=${data.length}`)
-                    
-                    const argsOffset = msgIdOffset + msgIdField
-                    console.log(`[TCP Transport] argsOffset=${argsOffset}`)
-                    
-                    if (data.length >= argsOffset + 4) {
-                      const argsLen = new DataView(data.buffer, data.byteOffset + argsOffset, 4).getUint32(0, false)
-                      const argsPadded = Math.ceil(argsLen / 4) * 4
-                      const messageTotal = 16 + 32 + msgIdField + 4 + argsPadded
-                      console.log(`[TCP Transport] argsLen=${argsLen}, argsPadded=${argsPadded}, total=${messageTotal}, have=${data.length}`)
-                      
-                      if (data.length >= messageTotal) {
-                        const message = new Uint8Array(data.subarray(0, messageTotal))
-                        const remaining = data.subarray(messageTotal)
-                        if (remaining.length > 0) {
-                          console.log(`[TCP Transport] Split: extracted ${messageTotal}, remaining ${remaining.length}`)
-                          this.socket.unshift(remaining)
-                        }
-                        resolve(message)
-                        return
-                      }
-                    }
-                    // Not complete, wait more
-                  }
-                }
-              }
-              
-              // If complete, return the message; otherwise wait for more data
-              if (data.length >= 48) {
-                // Return what we have if it looks like a reasonable message
-                resolve(new Uint8Array(data))
-              } else {
-                // Not enough data yet, continue waiting
-                timeoutHandle.refresh()
-              }
-            } catch (e) {
-              // If parsing fails but we have data, return it
-              if (data.length >= 16) {
-                resolve(new Uint8Array(data))
-              }
-            }
-          } else {
-            // Don't have full header yet, wait more
-            timeoutHandle.refresh()
-          }
+        this.bufferListeners = this.bufferListeners.filter(l => l !== onData);
+        // Check once more if data arrived during cleanup
+        const message = this.tryParseCompleteMessage();
+        if (message) {
+          resolve(message);
         } else {
-          reject(new Error('TCP receive timeout'))
+          reject(new Error(`TCP receive timeout: no complete message available (${this.receiveBuffer.length} bytes buffered)`));
         }
-      }, 1000)
-    })
+      }, 1000);
+
+      const onData = (message: Uint8Array) => {
+        clearTimeout(timeoutHandle);
+        this.bufferListeners = this.bufferListeners.filter(l => l !== onData);
+        resolve(message);
+      };
+
+      this.bufferListeners.push(onData);
+      
+      // Check immediately in case data arrived just now
+      this.checkAndDispatch();
+    });
   }
 
   async close(): Promise<void> {
+    // Clear any pending listeners
+    this.bufferListeners = [];
+    
     if (this.isServer && this.server) {
       this.server.close();
     }
@@ -210,6 +262,8 @@ export class TcpTransport implements Transport {
       this.socket.destroy();
       this.connected = false;
     }
+    // Clear the receive buffer
+    this.receiveBuffer = new Uint8Array(0);
   }
 
   isConnected(): boolean {
