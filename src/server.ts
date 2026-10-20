@@ -153,23 +153,24 @@ console.log("start to listen");
       // Decode the header
       const header = decode(new Uint8Array(message.subarray(0, 16)));
       
-      // Extract msgId if present
+      // Extract proc from call header at offset 16
+      // Call header format from encodeCall: prognum(4) + vers(4) + proc(4) + reserved(4) + authHeader(16) = 32 bytes
+      const callHeader = new DataView(message.buffer, message.byteOffset + 16, 32);
+      const proc = callHeader.getUint32(8, false);  // proc is at offset 8 within call header
+      
+      // Extract msgId if present (after call header, at offset 16 + 32 = 48)
       let msgId: string | undefined;
-      const callArgsOffset = 36;
-      if (message.length > callArgsOffset) {
-        const msgIdLen = new DataView(message.buffer, message.byteOffset + callArgsOffset, 4).getUint32(0, false);
-        if (msgIdLen > 0 && message.length >= callArgsOffset + 4 + msgIdLen) {
-          const msgIdBytes = message.subarray(callArgsOffset + 4, callArgsOffset + 4 + msgIdLen);
+      const callHeaderOffset = 48; // After 16-byte header + 32-byte call header
+      if (message.length > callHeaderOffset) {
+        const msgIdLen = new DataView(message.buffer, message.byteOffset + callHeaderOffset, 4).getUint32(0, false);
+        if (msgIdLen > 0 && message.length >= callHeaderOffset + 4 + msgIdLen) {
+          const msgIdBytes = message.subarray(callHeaderOffset + 4, callHeaderOffset + 4 + msgIdLen);
           msgId = new TextDecoder().decode(msgIdBytes).trim();
         }
       }
       
-      // Extract proc from call header
-      const callHeader = new DataView(message.buffer, message.byteOffset + 16, 20);
-      const proc = callHeader.getUint32(0, false);
-      
-      // Extract arguments
-      const argsStart = msgId ? callArgsOffset + 4 + msgId.length + (4 - (msgId.length % 4)) % 4 : callArgsOffset;
+      // Extract arguments (after msgId)
+      const argsStart = msgId ? callHeaderOffset + 4 + msgIdLen + ((4 - (msgIdLen % 4)) % 4) : callHeaderOffset;
       const args = message.subarray(argsStart);
 
       console.log(`[RPC Server] Queued incoming: proc=${proc}, ${msgId ? `msgId=${msgId}, ` : ''}args=${args.length} bytes`);
@@ -498,7 +499,7 @@ export async function startRpcServer(
   host: string = '127.0.0.1',
   port: number = 5000
 ): Promise<RpcServer> {
-  const transport = new TcpTransport(host, port);
+  const transport = new TcpTransport(host, port, true); // Server mode!
   const server = new RpcServer({ transport });
   await server.start();
   return server;
