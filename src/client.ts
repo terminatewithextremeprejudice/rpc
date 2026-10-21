@@ -245,21 +245,30 @@ export class RpcClient {
 
     const header = decode(response.subarray(0, 16));
 
-    // Extract msgId from response if present (after call header: 16 + 32 = 48)
+    // Reply format: header(16) + callHeader(32) + msgId(opaque, optional) + result(opaque)
+    let offset = 48; // After header + callHeader
+
+    // Extract msgId if present
     let responseMsgId: string | undefined;
-    let msgIdLen = 0;
-    if (response.length > 52) {
-      msgIdLen = new DataView(response.buffer, response.byteOffset + 48, 4).getUint32(0, false);
-      if (msgIdLen > 0 && response.length >= 52 + msgIdLen) {
-        const msgIdBytes = response.subarray(52, 52 + msgIdLen);
-        // Decode and strip null terminator + padding
-        responseMsgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
+    if (response.length >= offset + 4) {
+      const msgIdLen = new DataView(response.buffer, response.byteOffset + offset, 4).getUint32(0, false);
+      if (msgIdLen > 0) {
+        const msgIdPadded = Math.ceil(msgIdLen / 4) * 4;
+        const msgIdTotal = 4 + msgIdPadded;
+        responseMsgId = new TextDecoder().decode(response.subarray(offset + 4, offset + 4 + msgIdLen)).split('\0')[0];
+        offset += msgIdTotal;
       }
+    }
+
+    // Extract result (opaque field)
+    let resultValue: Uint8Array | undefined;
+    if (response.length >= offset + 4) {
+      const resultLen = new DataView(response.buffer, response.byteOffset + offset, 4).getUint32(0, false);
+      resultValue = response.subarray(offset + 4, offset + 4 + resultLen);
     }
 
     if (expectedMsgId && responseMsgId && responseMsgId !== expectedMsgId) {
       console.warn(`[RPC Client] Message ID mismatch: expected ${expectedMsgId}, got ${responseMsgId}`);
-      // Cache this response anyway, it might be for a pending async call
       if (responseMsgId) {
         this.pendingResponses.set(responseMsgId, Buffer.from(response));
       }
@@ -268,10 +277,10 @@ export class RpcClient {
     console.log(`[RPC Client] Received reply: type=${header.type}, status=${header.authType}${responseMsgId ? `, msgId=${responseMsgId}` : ''}`);
 
     return {
-      status: header.type === RpcConstants.CallTypes.RPC_REPLY 
-        ? RpcConstants.ReplyStates.RPC_ACCEPTED 
+      status: header.type === RpcConstants.CallTypes.RPC_REPLY
+        ? RpcConstants.ReplyStates.RPC_ACCEPTED
         : header.authType,
-      value: null, // For now, we don't decode the actual return value
+      value: resultValue,
       msgId: responseMsgId
     };
   }
