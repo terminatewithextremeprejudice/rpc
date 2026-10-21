@@ -116,14 +116,17 @@ export class TcpTransport implements Transport {
 
   /**
    * Check if we have a complete message in the buffer and notify waiters
+   * Does NOT extract messages from buffer - just dispatches to listeners
    */
   private checkAndDispatch(): void {
     // Loop while we have complete messages in the buffer and listeners waiting
     while (this.bufferListeners.length > 0) {
-      const message = this.tryParseCompleteMessage();
+      const message = this.peekCompleteMessage();
       if (message) {
         // Dispatch to the first waiting listener (FIFO order)
         const listener = this.bufferListeners.shift();
+        // Extract the message before dispatching
+        this.extractFromBuffer(message.length);
         if (listener) {
           listener(message);
         }
@@ -134,114 +137,121 @@ export class TcpTransport implements Transport {
   }
 
   /**
-   * Try to parse a complete RPC message from the buffer
+   * Peek at the next complete message in the buffer without extracting it
    * Returns the message if complete, or null if we need more data
+   * Does NOT modify this.receiveBuffer
    */
-  private tryParseCompleteMessage(): Uint8Array | null {
+  private peekCompleteMessage(): Uint8Array | null {
     const data = this.receiveBuffer;
     const minHeaderBytes = 16; // Basic XDR header
 
-    console.log(`[tryParseCompleteMessage] Called with ${data.length} bytes in buffer`);
-
     // Not enough for even the header
     if (data.length < minHeaderBytes) {
-      console.log(`[tryParseCompleteMessage] Too few bytes for header, returning null`);
       return null;
     }
 
     try {
       // Parse the header
       const header = decode(new Uint8Array(data.subarray(0, 16)));
-      
-      // Check if we have at least header + call header (16 + 20 = 36 bytes total)
-      if (data.length < 36) {
-        return null;
-      }
 
       // For RPC calls, we need to calculate full message size
       // Message layout: header(16) + callHeader(32) + msgId + args
-      // callHeader: prognum(4) + vers(4) + proc(4) + reserved(4) + authHeader(16) = 32 bytes total
       if (header.type === RpcConstants.CallTypes.RPC_CALL) {
-        const msgIdOffset = 16 + 32;  // msgId after 16-byte header + 32-byte call header = offset 48
-        console.log(`[tryParseCompleteMessage] RPC_CALL detected, data=${data.length}, msgIdOffset=${msgIdOffset}`);
-        
+        const msgIdOffset = 48; // After header(16) + callHeader(32)
+
         if (data.length <= msgIdOffset + 4) {
-          console.log(`[tryParseCompleteMessage] Not enough for msgIdLen field, returning null`);
           return null;
         }
 
         const msgIdLen = new DataView(data.buffer, data.byteOffset + msgIdOffset, 4).getUint32(0, false);
-        console.log(`[tryParseCompleteMessage] msgIdLen=${msgIdLen}`);
-        
-        const msgIdEncodedLen = 4 + msgIdLen; // 4-byte length prefix + actual bytes
+        const msgIdEncodedLen = 4 + msgIdLen;
         const argsOffset = msgIdOffset + msgIdEncodedLen;
-        console.log(`[tryParseCompleteMessage] msgId field = ${msgIdEncodedLen}, argsOffset=${argsOffset}, data.length=${data.length}`);
 
         if (data.length < argsOffset + 4) {
-          console.log(`[tryParseCompleteMessage] Not enough for argsLen field, returning null`);
           return null;
         }
 
         const argsLen = new DataView(data.buffer, data.byteOffset + argsOffset, 4).getUint32(0, false);
-        console.log(`[tryParseCompleteMessage] argsLen=${argsLen}`);
-        
         const argsPadded = Math.ceil(argsLen / 4) * 4;
-        // header(16) + callHeader(32) + msgId_encoded + args_encoded
         const messageTotal = 16 + 32 + msgIdEncodedLen + 4 + argsPadded;
-        console.log(`[tryParseCompleteMessage] messageTotal=${messageTotal}, data.length=${data.length}`);
 
         if (data.length < messageTotal) {
-          console.log(`[tryParseCompleteMessage] Incomplete message, need more data (${data.length} < ${messageTotal})`);
-          return null; // Incomplete message, need more data
-        }
-
-        // Extract the complete message and update buffer
-        const message = new Uint8Array(data.subarray(0, messageTotal));
-        this.receiveBuffer = new Uint8Array(data.subarray(messageTotal));
-        
-        console.log(`[TCP Transport] Extracted complete message: ${messageTotal} bytes, ${this.receiveBuffer.length} remaining in buffer`);
-        return message;
-      }
-
-      // For replies (RPC_REPLY), extract complete reply
-      // Reply: header(16) + callHeader(32) + optional msgId + result
-      // callHeader for reply is same 32-byte format as call
-      if (header.type === RpcConstants.CallTypes.RPC_REPLY) {
-        // Check if we have header + call header (16 + 32 = 48 bytes)
-        if (data.length < 48) {
-          console.log(`[tryParseCompleteMessage] Reply: not enough for full header+callHeader, returning null`);
           return null;
         }
-        // Check if msgId is present (after call header offset = 48)
-        let replySize = 48;
-        if (data.length >= 48 + 4) {
-          const msgIdLen = new DataView(data.buffer, data.byteOffset + 48, 4).getUint32(0, false);
-          console.log(`[tryParseCompleteMessage] Reply: message has msgId with len=${msgIdLen}`);
-          if (msgIdLen > 0) {
-            const msgIdPadded = 4 + msgIdLen + ((4 - (msgIdLen % 4)) % 4);
-            replySize += msgIdPadded;
-          }
-        }
-        // Add any remaining data as result
-        if (data.length >= replySize) {
-          const message = new Uint8Array(data.subarray(0, replySize));
-          this.receiveBuffer = new Uint8Array(data.subarray(replySize));
-          console.log(`[TCP Transport] Extracted reply: ${message.length} bytes`);
-          return message;
-        }
-        return null;
+
+        // Return the complete message WITHOUT extracting
+        return new Uint8Array(data.subarray(0, messageTotal));
       }
 
-      // For other/unrecognized message types, require complete data
-      // Return null if we can't determine message boundaries
-      return null;
+      // For replies (RPC_REPLY)
+      // Format: header(16) + callHeader(32) + msgId(opaque) + result(opaque)
+      if (header.type === RpcConstants.CallTypes.RPC_REPLY) {
+        if (data.length < 48) {
+          return null;
+        }
 
+        let offset = 48;
+        
+        // Check if msgId is present
+        if (data.length < offset + 4) {
+          return null;
+        }
+        
+        const msgIdLen = new DataView(data.buffer, data.byteOffset + offset, 4).getUint32(0, false);
+        if (msgIdLen > 0) {
+          const msgIdPadded = Math.ceil(msgIdLen / 4) * 4;
+          const msgIdTotal = 4 + msgIdPadded;
+          offset += msgIdTotal;
+        }
+
+        // Now parse the result (opaque field)
+        if (data.length < offset + 4) {
+          return null;
+        }
+
+        const resultLen = new DataView(data.buffer, data.byteOffset + offset, 4).getUint32(0, false);
+        const resultPadded = Math.ceil(resultLen / 4) * 4;
+        const resultTotal = 4 + resultPadded;
+        const fullMsgSize = offset + resultTotal;
+
+        if (data.length < fullMsgSize) {
+          return null;
+        }
+
+        return new Uint8Array(data.subarray(0, fullMsgSize));
+      }
+
+      return null;
     } catch (e) {
-      // If parsing fails, we might have malformed data or incomplete header
-      console.warn(`[TCP Transport] Parse error, waiting for more data:`, e instanceof Error ? e.message : String(e));
       return null;
     }
+  }
 
+  /**
+   * Extract N bytes from the front of the receive buffer
+   * @param count - Number of bytes to extract
+   * @returns The extracted bytes, or null if not enough in buffer
+   */
+  private extractFromBuffer(count: number): Uint8Array | null {
+    if (this.receiveBuffer.length < count) {
+      return null;
+    }
+    const extracted = new Uint8Array(this.receiveBuffer.subarray(0, count));
+    this.receiveBuffer = new Uint8Array(this.receiveBuffer.subarray(count));
+    return extracted;
+  }
+
+  /**
+   * Try to parse and extract a complete RPC message from the buffer
+   * Returns the message if complete, or null if we need more data
+   * Modifies this.receiveBuffer by removing the extracted message
+   */
+  private tryParseCompleteMessage(): Uint8Array | null {
+    const msg = this.peekCompleteMessage();
+    if (msg) {
+      this.extractFromBuffer(msg.length);
+      return msg;
+    }
     return null;
   }
 
@@ -263,10 +273,11 @@ export class TcpTransport implements Transport {
       throw new Error('TCP transport not connected');
     }
 
-    // Check if we already have a complete message in the buffer
-    const cachedMessage = this.tryParseCompleteMessage();
+    // Check if we already have a complete message in the buffer (without extracting)
+    const cachedMessage = this.peekCompleteMessage();
     if (cachedMessage) {
-      console.log(`[TCP Transport] Returning cached message from buffer: ${cachedMessage.length} bytes`);
+      // Extract it from buffer before returning
+      this.extractFromBuffer(cachedMessage.length);
       return cachedMessage;
     }
 

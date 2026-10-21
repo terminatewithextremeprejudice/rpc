@@ -286,7 +286,7 @@ export class RpcServer {
 
     const chunks: Uint8Array[] = [];
     chunks.push(encode(replyHeader));
-    chunks.push(new Uint8Array(replyCallHeader.subarray(0, 20))); // Only first 4 fields
+    chunks.push(new Uint8Array(replyCallHeader.subarray(0, 32))); // Full call header (32 bytes)
     
     // Include message ID if provided
     if (msgId) {
