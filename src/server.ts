@@ -1,7 +1,7 @@
 // RPC Server Implementation
 // Handles incoming XDR-encoded RPC calls and dispatches them to handlers
 
-import { decode, encode, encodeCall, decodeCall, encodeString, type XDRHeader, RpcConstants } from './shared/xdr.ts';
+import { decode, encode, encodeCall, decodeCall, encodeString, decodeOpaque, type XDRHeader, RpcConstants } from './shared/xdr.ts';
 import { Transport, TcpTransport } from './transport.ts';
 
 export interface RpcHandler {
@@ -157,8 +157,8 @@ export class RpcServer {
       const header = decode(new Uint8Array(message.subarray(0, 16)));
       
       // Extract proc from call header at offset 16 (after basic header)
-      // Call header format: prognum(4) + vers(4) + proc(4) + reserved(4) + authHeader(16) = 20 bytes total
-      const callHeader = new DataView(message.buffer, message.byteOffset + 16, 20);
+      // Call header format: prognum(4) + vers(4) + proc(4) + reserved(4) + authHeader(16) = 32 bytes total
+      const callHeader = new DataView(message.buffer, message.byteOffset + 16, 32);
       const proc = callHeader.getUint32(8, false);  // proc is at offset 8 within call header
       
       // Extract msgId if present (after call header, at offset 16 + 32 = 48)
@@ -174,10 +174,11 @@ export class RpcServer {
         }
       }
       
-      // Extract arguments (after msgId with its padding)
-      const msgIdPaddedLen = msgIdLen + ((4 - (msgIdLen % 4)) % 4);
-      const argsStart = msgIdLen > 0 ? callHeaderOffset + 4 + msgIdPaddedLen : callHeaderOffset;
-      const args = message.subarray(argsStart);
+      // Extract arguments (after msgId field which is 4 + msgIdLen bytes total)
+      const argsStart = msgIdLen > 0 ? callHeaderOffset + 4 + msgIdLen : callHeaderOffset;
+      const rawArgs = message.subarray(argsStart);
+      // Decode XDR opaque args to get the raw data without length prefix
+      const args = decodeOpaque(rawArgs);
 
       console.log(`[RPC Server] Queued incoming: proc=${proc}, ${msgId ? `msgId=${msgId}, ` : ''}args=${args.length} bytes`);
 

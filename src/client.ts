@@ -243,10 +243,14 @@ export class RpcClient {
       throw new Error(`Response too short: ${response.length} bytes`);
     }
 
+    // Decode reply header  
+    if (response.length < 16) {
+      throw new Error(`Response too short: ${response.length} bytes`);
+    }
     const header = decode(response.subarray(0, 16));
-
-    // Reply format: header(16) + callHeader(32) + msgId(opaque, optional) + result(opaque)
-    let offset = 48; // After header + callHeader
+    
+    // Reply format: header(16) + callHeader(32) + msgId(string, optional) + result(opaque)
+    let offset = 48; // After header(16) + callHeader(32) = 48
 
     // Extract msgId if present
     let responseMsgId: string | undefined;
