@@ -203,3 +203,110 @@ describe('Non-blocking TCP RPC Integration', () => {
 
 });
 
+describe('Non-blocking TCP with concurrent clients', () => {
+  let server: RpcServer;
+  let port: number;
+
+  beforeEach(async () => {
+    port = getPort();
+    const transport = new TcpTransport('127.0.0.1', port, true);
+    server = new RpcServer({ transport });
+    server.register(1, 2, (args: Uint8Array) => args);
+    await server.start(false); // Don't wait for client connection
+  });
+
+  afterEach(async () => {
+    if (server && server.isRunning()) {
+      await server.stop();
+    }
+  });
+
+  test('server handles multiple clients with interleaved requests', async () => {
+    const client1 = await createTcpClient(100003, 2, '127.0.0.1', port);
+    const client2 = await createTcpClient(100003, 2, '127.0.0.1', port);
+    
+    // Client1 fires first
+    const h1 = await client1.fire(1, new TextEncoder().encode('client1-msg'));
+    
+    // Client2 fires second (interleaved in server's receive buffer)
+    const h2 = await client2.fire(1, new TextEncoder().encode('client2-msg'));
+    
+    // Server queues both requests
+    await server.queueIncomingRequest();
+    await server.queueIncomingRequest();
+    
+    // Server processes both and flushes responses
+    await server.processAndFlush();
+    
+    // Each client collects its own response
+    const r1 = await client1.getResponse(h1.msgId, 2000);
+    const r2 = await client2.getResponse(h2.msgId, 2000);
+    
+    expect(r1.status).toBe(0);
+    expect(r2.status).toBe(0);
+    
+    // Responses are correctly matched to their respective clients
+    expect(new TextDecoder().decode(r1.value!).replace(/\0/g, '')).toBe('client1-msg');
+    expect(new TextDecoder().decode(r2.value!).replace(/\0/g, '')).toBe('client2-msg');
+    
+    // Cleanup
+    await client1.disconnect();
+    await client2.disconnect();
+  });
+
+  test('multi-client pipelined requests processed out of order', async () => {
+    const client1 = await createTcpClient(100003, 2, '127.0.0.1', port);
+    const client2 = await createTcpClient(100003, 2, '127.0.0.1', port);
+    
+    // Both clients fire 2 requests each
+    const c1_h1 = await client1.fire(1, new TextEncoder().encode('C1-req1'));
+    const c1_h2 = await client1.fire(1, new TextEncoder().encode('C1-req2'));
+    const c2_h1 = await client2.fire(1, new TextEncoder().encode('C2-req1'));
+    const c2_h2 = await client2.fire(1, new TextEncoder().encode('C2-req2'));
+    
+    // Server queues all 4 requests
+    await server.queueIncomingRequest();
+    await server.queueIncomingRequest();
+    await server.queueIncomingRequest();
+    await server.queueIncomingRequest();
+    
+    expect(server.getStats().pendingRequests).toBe(4);
+    
+    // Process in mixed order
+    await server.processAndFlush();
+    
+    // Each client collects their own responses
+    const c1_responses = await client1.collectResponses(2000);
+    const c2_responses = await client2.collectResponses(2000);
+    
+    expect(c1_responses.size).toBe(2);
+    expect(c2_responses.size).toBe(2);
+    
+    // Verify each client got their own responses
+    const c1_r1 = c1_responses.get(c1_h1.msgId!);
+    const c1_r2 = c1_responses.get(c1_h2.msgId!);
+    const c2_r1 = c2_responses.get(c2_h1.msgId!);
+    const c2_r2 = c2_responses.get(c2_h2.msgId!);
+    
+    expect(c1_r1?.status).toBe(0);
+    expect(new TextDecoder().decode(c1_r1?.value!).replace(/\0/g, '')).toBe('C1-req1');
+    expect(c1_r2?.status).toBe(0);
+    expect(new TextDecoder().decode(c1_r2?.value!).replace(/\0/g, '')).toBe('C1-req2');
+    expect(c2_r1?.status).toBe(0);
+    expect(new TextDecoder().decode(c2_r1?.value!).replace(/\0/g, '')).toBe('C2-req1');
+    expect(c2_r2?.status).toBe(0);
+    expect(new TextDecoder().decode(c2_r2?.value!).replace(/\0/g, '')).toBe('C2-req2');
+    
+    // Verify correct matching - client1 doesn't get client2's responses
+    expect(c1_responses.get(c2_h1.msgId!)).toBeUndefined();
+    expect(c1_responses.get(c2_h2.msgId!)).toBeUndefined();
+    expect(c2_responses.get(c1_h1.msgId!)).toBeUndefined();
+    expect(c2_responses.get(c1_h2.msgId!)).toBeUndefined();
+    
+    // Cleanup
+    await client1.disconnect();
+    await client2.disconnect();
+    await server.stop();
+  });
+});
+
