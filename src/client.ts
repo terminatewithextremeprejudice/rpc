@@ -187,26 +187,28 @@ export class RpcClient {
 
     // Then poll the transport for any new responses
     const deadline = Date.now() + timeout;
-    while (Date.now() < deadline && this.pendingRequests?.size !== this.pendingResponses.size) {
-      // Use transport's receive() which properly extracts complete messages
+    let consecutiveDuplicates = 0;
+    
+    while (Date.now() < deadline && consecutiveDuplicates < 2) {
       try {
         const transport = this.getTransport();
         const response = await transport.receive(2048);
         
         const result = this.decodeResponse(response);
-        if (result.msgId && !results.has(result.msgId)) {
-          results.set(result.msgId, result);
-        } else if (result.msgId) {
-          // Cache for potential future collection
-          this.pendingResponses.set(result.msgId, Buffer.from(response));
+        if (result.msgId) {
+          if (results.has(result.msgId)) {
+            // Already collected this one
+            consecutiveDuplicates++;
+          } else {
+            results.set(result.msgId, result);
+            consecutiveDuplicates = 0;
+          }
         }
       } catch (err: any) {
-        // timeout or error - no more data available right now
         if (err.message?.includes('timeout')) {
           break;
         }
       }
-      // Small yield to prevent busy loop
       await new Promise(r => setTimeout(r, 10));
     }
 

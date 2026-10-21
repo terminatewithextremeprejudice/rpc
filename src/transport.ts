@@ -118,19 +118,17 @@ export class TcpTransport implements Transport {
    * Check if we have a complete message in the buffer and notify waiters
    */
   private checkAndDispatch(): void {
-    // Loop while we have complete messages in the buffer
-    while (true) {
+    // Loop while we have complete messages in the buffer and listeners waiting
+    while (this.bufferListeners.length > 0) {
       const message = this.tryParseCompleteMessage();
       if (message) {
-        // Notify any listeners that are waiting for data
-        for (const listener of this.bufferListeners) {
+        // Dispatch to the first waiting listener (FIFO order)
+        const listener = this.bufferListeners.shift();
+        if (listener) {
           listener(message);
         }
-        // Clear the listeners since we're dispatching synchronously
-        this.bufferListeners = [];
-        // Continue the loop to check for more complete messages
       } else {
-        break;
+        break; // No more complete messages to dispatch
       }
     }
   }
@@ -143,8 +141,11 @@ export class TcpTransport implements Transport {
     const data = this.receiveBuffer;
     const minHeaderBytes = 16; // Basic XDR header
 
+    console.log(`[tryParseCompleteMessage] Called with ${data.length} bytes in buffer`);
+
     // Not enough for even the header
     if (data.length < minHeaderBytes) {
+      console.log(`[tryParseCompleteMessage] Too few bytes for header, returning null`);
       return null;
     }
 
@@ -160,23 +161,34 @@ export class TcpTransport implements Transport {
       // For RPC calls, we need to calculate full message size
       if (header.type === RpcConstants.CallTypes.RPC_CALL) {
         const msgIdOffset = 36;  // After 16-byte header + 20-byte call header
+        console.log(`[tryParseCompleteMessage] RPC_CALL detected, data=${data.length}, msgIdOffset=${msgIdOffset}`);
+        
         if (data.length <= msgIdOffset + 4) {
+          console.log(`[tryParseCompleteMessage] Not enough for msgIdLen field, returning null`);
           return null;
         }
 
         const msgIdLen = new DataView(data.buffer, data.byteOffset + msgIdOffset, 4).getUint32(0, false);
+        console.log(`[tryParseCompleteMessage] msgIdLen=${msgIdLen}`);
+        
         const msgIdField = 4 + msgIdLen;
         const argsOffset = msgIdOffset + msgIdField;
+        console.log(`[tryParseCompleteMessage] msgIdField=${msgIdField}, argsOffset=${argsOffset}, data.length=${data.length}`);
 
         if (data.length < argsOffset + 4) {
+          console.log(`[tryParseCompleteMessage] Not enough for argsLen field, returning null`);
           return null;
         }
 
         const argsLen = new DataView(data.buffer, data.byteOffset + argsOffset, 4).getUint32(0, false);
+        console.log(`[tryParseCompleteMessage] argsLen=${argsLen}`);
+        
         const argsPadded = Math.ceil(argsLen / 4) * 4;
         const messageTotal = 16 + 20 + msgIdField + 4 + argsPadded;
+        console.log(`[tryParseCompleteMessage] messageTotal=${messageTotal}, data.length=${data.length}`);
 
         if (data.length < messageTotal) {
+          console.log(`[tryParseCompleteMessage] Incomplete message, need more data (${data.length} < ${messageTotal})`);
           return null; // Incomplete message, need more data
         }
 
@@ -215,17 +227,14 @@ export class TcpTransport implements Transport {
         return null;
       }
 
-      // For other message types, try to parse what we have
-      if (data.length >= 16) {
-        return new Uint8Array(data.subarray(0, 16));
-      }
+      // For other/unrecognized message types, require complete data
+      // Return null if we can't determine message boundaries
+      return null;
 
     } catch (e) {
       // If parsing fails, we might have malformed data or incomplete header
-      console.warn(`[TCP Transport] Parse error:`, e);
-      if (data.length >= 16) {
-        return new Uint8Array(data.subarray(0, 16));
-      }
+      console.warn(`[TCP Transport] Parse error, waiting for more data:`, e instanceof Error ? e.message : String(e));
+      return null;
     }
 
     return null;
@@ -267,7 +276,7 @@ export class TcpTransport implements Transport {
         } else {
           reject(new Error(`TCP receive timeout: no complete message available (${this.receiveBuffer.length} bytes buffered)`));
         }
-      }, 1000);
+      }, 500); // Reduced timeout for testing
 
       const onData = (message: Uint8Array) => {
         clearTimeout(timeoutHandle);
@@ -276,7 +285,7 @@ export class TcpTransport implements Transport {
       };
 
       this.bufferListeners.push(onData);
-      
+        
       // Check immediately in case data arrived just now
       this.checkAndDispatch();
     });
