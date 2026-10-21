@@ -161,10 +161,10 @@ export class RpcServer {
       const callHeader = new DataView(message.buffer, message.byteOffset + 16, 20);
       const proc = callHeader.getUint32(8, false);  // proc is at offset 8 within call header
       
-      // Extract msgId if present (after call header, at offset 16 + 20 = 36)
+      // Extract msgId if present (after call header, at offset 16 + 32 = 48)
       let msgId: string | undefined;
       let msgIdLen: number = 0;
-      const callHeaderOffset = 36; // After 16-byte base header + 20-byte call header
+      const callHeaderOffset = 48; // After 16-byte base header + 32-byte call header
       if (message.length > callHeaderOffset + 4) {
         msgIdLen = new DataView(message.buffer, message.byteOffset + callHeaderOffset, 4).getUint32(0, false);
         if (msgIdLen > 0 && message.length >= callHeaderOffset + 4 + msgIdLen) {
@@ -227,8 +227,8 @@ export class RpcServer {
       return this.buildErrorMessage(RpcConstants.ReplyStates.RPC_GARBAGE);
     }
 
-    // Decode call header (20 bytes after basic header)
-    const callHeaderOffset = 16 + 20; // msgId comes after 20-byte call header = offset 36
+    // Decode call header (32 bytes after basic header)
+    const callHeaderOffset = 16 + 32; // msgId comes after 32-byte call header = offset 48
     
     // Extract message ID from the call (XDR-encoded string after call header)
     let msgId: string | undefined;

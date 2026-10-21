@@ -245,13 +245,13 @@ export class RpcClient {
 
     const header = decode(response.subarray(0, 16));
 
-    // Extract msgId from response if present (after call header: 16 + 20 = 36)
+    // Extract msgId from response if present (after call header: 16 + 32 = 48)
     let responseMsgId: string | undefined;
     let msgIdLen = 0;
-    if (response.length > 36 + 4) {
-      msgIdLen = new DataView(response.buffer, response.byteOffset + 36, 4).getUint32(0, false);
-      if (msgIdLen > 0 && response.length >= 40 + msgIdLen) {
-        const msgIdBytes = response.subarray(40, 40 + msgIdLen);
+    if (response.length > 52) {
+      msgIdLen = new DataView(response.buffer, response.byteOffset + 48, 4).getUint32(0, false);
+      if (msgIdLen > 0 && response.length >= 52 + msgIdLen) {
+        const msgIdBytes = response.subarray(52, 52 + msgIdLen);
         // Decode and strip null terminator + padding
         responseMsgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
       }

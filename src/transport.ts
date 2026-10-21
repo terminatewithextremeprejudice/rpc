@@ -159,8 +159,10 @@ export class TcpTransport implements Transport {
       }
 
       // For RPC calls, we need to calculate full message size
+      // Message layout: header(16) + callHeader(32) + msgId + args
+      // callHeader: prognum(4) + vers(4) + proc(4) + reserved(4) + authHeader(16) = 32 bytes total
       if (header.type === RpcConstants.CallTypes.RPC_CALL) {
-        const msgIdOffset = 36;  // After 16-byte header + 20-byte call header
+        const msgIdOffset = 16 + 32;  // msgId after 16-byte header + 32-byte call header = offset 48
         console.log(`[tryParseCompleteMessage] RPC_CALL detected, data=${data.length}, msgIdOffset=${msgIdOffset}`);
         
         if (data.length <= msgIdOffset + 4) {
@@ -171,9 +173,9 @@ export class TcpTransport implements Transport {
         const msgIdLen = new DataView(data.buffer, data.byteOffset + msgIdOffset, 4).getUint32(0, false);
         console.log(`[tryParseCompleteMessage] msgIdLen=${msgIdLen}`);
         
-        const msgIdField = 4 + msgIdLen;
-        const argsOffset = msgIdOffset + msgIdField;
-        console.log(`[tryParseCompleteMessage] msgIdField=${msgIdField}, argsOffset=${argsOffset}, data.length=${data.length}`);
+        const msgIdEncodedLen = 4 + msgIdLen; // 4-byte length prefix + actual bytes
+        const argsOffset = msgIdOffset + msgIdEncodedLen;
+        console.log(`[tryParseCompleteMessage] msgId field = ${msgIdEncodedLen}, argsOffset=${argsOffset}, data.length=${data.length}`);
 
         if (data.length < argsOffset + 4) {
           console.log(`[tryParseCompleteMessage] Not enough for argsLen field, returning null`);
@@ -184,7 +186,8 @@ export class TcpTransport implements Transport {
         console.log(`[tryParseCompleteMessage] argsLen=${argsLen}`);
         
         const argsPadded = Math.ceil(argsLen / 4) * 4;
-        const messageTotal = 16 + 20 + msgIdField + 4 + argsPadded;
+        // header(16) + callHeader(32) + msgId_encoded + args_encoded
+        const messageTotal = 16 + 32 + msgIdEncodedLen + 4 + argsPadded;
         console.log(`[tryParseCompleteMessage] messageTotal=${messageTotal}, data.length=${data.length}`);
 
         if (data.length < messageTotal) {
@@ -201,17 +204,19 @@ export class TcpTransport implements Transport {
       }
 
       // For replies (RPC_REPLY), extract complete reply
-      // Reply: header(16) + callHeader(16) + optional msgId + result
+      // Reply: header(16) + callHeader(32) + optional msgId + result
+      // callHeader for reply is same 32-byte format as call
       if (header.type === RpcConstants.CallTypes.RPC_REPLY) {
-        // Check if we have header + at least some call header
-        if (data.length < 32) {
+        // Check if we have header + call header (16 + 32 = 48 bytes)
+        if (data.length < 48) {
+          console.log(`[tryParseCompleteMessage] Reply: not enough for full header+callHeader, returning null`);
           return null;
         }
-        // Reply callHeader is 20 bytes but we only need first 16 for status
-        // Check if msgId is present (after call header offset = 32)
-        let replySize = 32;
-        if (data.length > 32 + 4) {
-          const msgIdLen = new DataView(data.buffer, data.byteOffset + 32, 4).getUint32(0, false);
+        // Check if msgId is present (after call header offset = 48)
+        let replySize = 48;
+        if (data.length >= 48 + 4) {
+          const msgIdLen = new DataView(data.buffer, data.byteOffset + 48, 4).getUint32(0, false);
+          console.log(`[tryParseCompleteMessage] Reply: message has msgId with len=${msgIdLen}`);
           if (msgIdLen > 0) {
             const msgIdPadded = 4 + msgIdLen + ((4 - (msgIdLen % 4)) % 4);
             replySize += msgIdPadded;
@@ -219,8 +224,8 @@ export class TcpTransport implements Transport {
         }
         // Add any remaining data as result
         if (data.length >= replySize) {
-          const message = new Uint8Array(data.subarray(0, data.length));
-          this.receiveBuffer = new Uint8Array(0);
+          const message = new Uint8Array(data.subarray(0, replySize));
+          this.receiveBuffer = new Uint8Array(data.subarray(replySize));
           console.log(`[TCP Transport] Extracted reply: ${message.length} bytes`);
           return message;
         }
