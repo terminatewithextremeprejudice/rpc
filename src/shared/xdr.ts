@@ -257,6 +257,38 @@ export function align4(value: number): number {
 }
 
 /**
+ * Compute how many bytes are occupied by the opaque/string field at `offset`
+ * (4 bytes length prefix + length bytes, padded to 4). Returns -1 if the
+ * buffer is too short to contain the length prefix.
+ */
+function opaqueFieldSize(data: Uint8Array, offset: number): number {
+  if (data.length < offset + 4) return -1;
+  const len = decodeUint32(data, offset);
+  return 4 + align4(len);
+}
+
+/**
+ * Length of one complete RPC message starting at the head of `data`.
+ * Wire format (both call and reply):
+ *   base header (16) + call header (32) + msgId (xdr string) + body (xdr opaque)
+ * Returns -1 if the buffer does not yet hold a complete message.
+ */
+export function messageSize(data: Uint8Array): number {
+  if (data.length < 16) return -1;
+  const { type } = decode(data.subarray(0, 16));
+  if (type !== RpcConstants.CallTypes.RPC_CALL && type !== RpcConstants.CallTypes.RPC_REPLY) {
+    return -1;
+  }
+  let offset = 48; // base(16) + callHeader(32)
+  const msgIdSize = data.length >= offset + 4 ? opaqueFieldSize(data, offset) : -1;
+  if (msgIdSize < 0) return -1;
+  offset += msgIdSize;
+  const bodySize = opaqueFieldSize(data, offset);
+  if (bodySize < 0) return -1;
+  return offset + bodySize;
+}
+
+/**
  * Concatenate multiple Uint8Arrays
  */
 export function concat(...arrays: Uint8Array[]): Uint8Array {
