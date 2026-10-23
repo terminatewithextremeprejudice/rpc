@@ -279,6 +279,55 @@ export class TcpTransport implements Transport {
     return !!(connection && connection.socket && !connection.socket.destroyed);
   }
 
+  /**
+   * Client mode: simplified connect check
+   */
+  clientIsConnected(): boolean {
+    if (this.isServer) {
+      return this.connections.size > 0;
+    }
+    return this.clientConnectionId ? this.isConnected(this.clientConnectionId) : false;
+  }
+
+  /**
+   * Client-only: send data (client mode only)
+   */
+  clientSend(data: Uint8Array): Promise<void> {
+    if (this.isServer) {
+      throw new Error('clientSend is server-only');
+    }
+    if (!this.clientConnectionId) {
+      throw new Error('Not connected');
+    }
+    return this.send(this.clientConnectionId, data);
+  }
+
+  /**
+   * Client-only: receive data (client mode only)
+   */
+  clientReceive(bufferSize: number): Promise<Uint8Array> {
+    if (this.isServer) {
+      throw new Error('clientReceive is server-only');
+    }
+    if (!this.clientConnectionId) {
+      throw new Error('Not connected');
+    }
+    return this.receive(this.clientConnectionId, bufferSize);
+  }
+
+  /**
+   * Client-only: close connection (client mode only)
+   */
+  clientClose(): Promise<void> {
+    if (this.isServer) {
+      throw new Error('clientClose is server-only');
+    }
+    if (!this.clientConnectionId) {
+      throw new Error('Not connected');
+    }
+    return this.close(this.clientConnectionId);
+  }
+
   getConnectionId(socket: any): string | undefined {
     for (const [connId, conn] of this.connections) {
       if (conn.socket === socket) return connId;

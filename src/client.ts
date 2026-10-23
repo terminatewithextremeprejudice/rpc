@@ -28,8 +28,7 @@ export class RpcClient {
   private vers: number;
   private timeout: number;
   private connected: boolean = false;
-  private connectionId: string | undefined;
-  
+
   // Pending responses: msgId -> raw buffer
   private pendingResponses: Map<string, Buffer> = new Map();
 
@@ -60,9 +59,7 @@ export class RpcClient {
       return;
     }
 
-    if (this.connectionId) {
-      await this.transport.close(this.connectionId);
-    }
+    await this.transport.clientClose();
     this.connected = false;
     this.pendingResponses.clear();
     console.log(`[RPC Client] Disconnected from server`);
@@ -70,13 +67,11 @@ export class RpcClient {
 
   /**
    * Get the connection ID for this client's transport
+   * Client doesn't need to track this - just sends/receives on its socket
    */
   getConnectionId(): string {
-    if (this.connectionId) {
-      return this.connectionId;
-    }
-    // Client mode: transport assigns ID on connect
-    // For now we use 'client' as a fallback - the transport will find the right connection
+    // Client mode: the transport handles connection tracking internally
+    // This is only used for logging/identification purposes
     return 'client';
   }
 
@@ -89,7 +84,7 @@ export class RpcClient {
       await this.connect();
     }
 
-    if (!this.transport.isConnected(this.getConnectionId())) {
+    if (!this.transport.clientIsConnected()) {
       throw new Error('Not connected to server');
     }
 
@@ -121,13 +116,13 @@ export class RpcClient {
       `[RPC Client] Sending CALL: prog=${this.prognum}, vers=${this.vers}, proc=${proc}, msgId=${callMsgId}`
     );
 
-    await this.transport.send(this.getConnectionId(), fullCall);
+    await this.transport.clientSend(fullCall);
 
     if (useAsync) {
       return { _async: true, msgId: callMsgId as string, proc, connectionId: this.getConnectionId() };
     }
 
-    const response = await this.receiveWithTimeout(this.getConnectionId(), 1024, callTimeout);
+    const response = await this.transport.clientReceive(1024);
     return this.decodeResponse(response, callMsgId as string);
   }
 
@@ -142,8 +137,7 @@ export class RpcClient {
       return this.decodeResponse(new Uint8Array(responseBuffer), msgId);
     }
 
-    const connId = this.getConnectionId();
-    const response = await this.receiveWithTimeout(connId, 2048, timeout);
+    const response = await this.transport.clientReceive(2048);
     
     this.pendingResponses.set(msgId, Buffer.from(response));
     return this.decodeResponse(response, msgId);
@@ -151,7 +145,6 @@ export class RpcClient {
 
   async collectResponses(timeout: number = 1000): Promise<Map<string, RpcCallResult>> {
     const results = new Map<string, RpcCallResult>();
-    const connId = this.getConnectionId();
 
     // Check cached responses
     for (const [msgId, responseBuffer] of this.pendingResponses) {
@@ -165,7 +158,7 @@ export class RpcClient {
 
     while (Date.now() < deadline && consecutiveDuplicates < 2) {
       try {
-        const response = await this.transport.receive(connId, 2048);
+        const response = await this.transport.clientReceive(2048);
         const result = this.decodeResponse(response);
         if (result.msgId) {
           if (results.has(result.msgId)) {
@@ -237,16 +230,12 @@ export class RpcClient {
     return crypto.randomUUID().split('-')[0]!;
   }
 
-  private async receiveWithTimeout(connectionId: string, bufferSize: number, timeoutMs: number): Promise<Uint8Array> {
-    return this.transport.receive(connectionId, bufferSize);
-  }
-
   getTransport(): TcpTransport {
     return this.transport;
   }
 
   isConnected(): boolean {
-    return this.connected && this.transport.isConnected(this.getConnectionId());
+    return this.connected;
   }
 }
 
