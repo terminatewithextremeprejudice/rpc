@@ -126,6 +126,67 @@ export class RpcServer {
   }
 
   /**
+   * Receive the next ready request from any connection
+   * @returns { connectionId, msgId, proc, args } for the first available request, or undefined if none ready
+   */
+  async receiveNext(): Promise<{ connectionId: string; msgId: string; proc: number; args: Uint8Array } | undefined> {
+    if (!this.running) {
+      throw new Error('Server not started. Call start() first.');
+    }
+
+    // Try to receive from each connection until we find one with a message
+    for (const [connId] of this.transport.connections) {
+      try {
+        // Check if this connection has a complete message (non-blocking peek)
+        // For now, we try receive and catch if no message is available
+        const message = await this.transport.receive(connId, 1024);
+        
+        // Parse the message
+        if (message.length < 16) {
+          continue;
+        }
+
+        const header = decode(new Uint8Array(message.subarray(0, 16)));
+        const callHeader = new DataView(message.buffer, message.byteOffset + 16, 32);
+        const proc = callHeader.getUint32(8, false);
+
+        let msgId: string | undefined;
+        let msgIdLen: number = 0;
+        const callHeaderOffset = 48;
+        if (message.length > callHeaderOffset + 4) {
+          msgIdLen = new DataView(message.buffer, message.byteOffset + callHeaderOffset, 4).getUint32(0, false);
+          if (msgIdLen > 0 && message.length >= callHeaderOffset + 4 + msgIdLen) {
+            const msgIdBytes = message.subarray(callHeaderOffset + 4, callHeaderOffset + 4 + msgIdLen);
+            msgId = new TextDecoder().decode(msgIdBytes).split('\0')[0];
+          }
+        }
+
+        // Extract arguments
+        const argsStart = msgIdLen > 0 ? callHeaderOffset + 4 + msgIdLen : callHeaderOffset;
+        const args = decodeOpaque(message.subarray(argsStart));
+
+        const requestId = msgId || crypto.randomUUID().split('-')[0]!;
+        
+        this.pendingRequests.set(requestId, { connectionId: connId, proc, args, msgId: requestId });
+        console.log(`[RPC Server] Received: conn=${connId}, proc=${proc}, msgId=${requestId}`);
+
+        return { connectionId: connId, msgId: requestId, proc, args };
+
+      } catch (error: any) {
+        // This connection didn't have a message ready, try the next one
+        if (!error.message?.includes('timeout') && !error.message?.includes('complete message')) {
+          console.error(`[RPC Server] Error receiving from ${connId}:`, error);
+        }
+        continue;
+      }
+    }
+
+    // No messages ready from any connection
+    console.log(`[RPC Server] No requests ready from any connection`);
+    return undefined;
+  }
+
+  /**
    * Process a queued request and build response
    * @param msgId - The message ID of the request to process
    */
