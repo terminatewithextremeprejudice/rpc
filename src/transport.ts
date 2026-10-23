@@ -1,53 +1,110 @@
 // Transport abstraction layer for RPC
-// Defines the interface that all transport implementations must satisfy
-// Includes message framing based on XDR header
+// Supports multiple concurrent connections with per-connection message tracking
 
-import { decode, RpcConstants } from './shared/xdr';
+import { decode, RpcConstants, messageSize } from './shared/xdr';
 
+/**
+ * Abstract base for all transport implementations.
+ * Each transport handles its own connection(s) and message delivery.
+ */
 export abstract class Transport {
   /**
-   * Initialize the transport connection
+   * Initialize the transport connection(s)
    * Called before any send/receive operations
    */
   abstract connect(): Promise<void>;
 
   /**
    * Send data through the transport
+   * @param connectionId - Identifier for the connection to use
    * @param data - Binary data to send
-   * @returns Promise that resolves when data is sent
    */
-  abstract send(data: Uint8Array): Promise<void>;
+  abstract send(connectionId: string, data: Uint8Array): Promise<void>;
 
   /**
    * Receive data from the transport
+   * @param connectionId - Identifier for the connection to receive from
    * @param bufferSize - Expected or maximum buffer size
    * @returns Promise that resolves with received data
    */
-  abstract receive(bufferSize: number): Promise<Uint8Array>;
+  abstract receive(connectionId: string, bufferSize: number): Promise<Uint8Array>;
 
   /**
-   * Close the transport connection
-   * Called when the RPC session is complete
+   * Close a specific connection
+   * @param connectionId - Identifier for the connection to close
    */
-  abstract close(): Promise<void>;
+  abstract close(connectionId: string): Promise<void>;
 
   /**
-   * Check if the transport is connected
+   * Check if a connection is active
    */
-  abstract isConnected(): boolean;
+  abstract isConnected(connectionId: string): boolean;
+
+  /**
+   * Get the connection ID associated with a socket/connection object
+   */
+  abstract getConnectionId(socket: any): string | undefined;
 }
 
-// TCP Transport (supports both server and client modes)
+/**
+ * Represents a single connection within a multi-connection transport
+ */
+export class Connection {
+  id: string;
+  socket: any;
+  receiveBuffer: Uint8Array = new Uint8Array(0);
+  resolveReceive: ((data: Uint8Array) => void) | null = null;
+  rejectReceive: ((error: Error) => void) | null = null;
+
+  constructor(id: string, socket: any) {
+    this.id = id;
+    this.socket = socket;
+  }
+
+  /**
+   * Check if a complete message is available in the buffer
+   */
+  hasCompleteMessage(): boolean {
+    const size = messageSize(this.receiveBuffer);
+    return size > 0;
+  }
+
+  /**
+   * Extract a complete message from the buffer
+   * Returns the message if complete, or null if we need more data
+   */
+  extractMessage(): Uint8Array | null {
+    const size = messageSize(this.receiveBuffer);
+    if (size <= 0) return null;
+    
+    const message = this.receiveBuffer.subarray(0, size);
+    this.receiveBuffer = this.receiveBuffer.subarray(size);
+    return message;
+  }
+
+  /**
+   * Append incoming data to the receive buffer
+   */
+  appendToBuffer(chunk: Uint8Array): void {
+    const oldBuffer = this.receiveBuffer;
+    const newBuffer = new Uint8Array(oldBuffer.length + chunk.length);
+    newBuffer.set(oldBuffer, 0);
+    newBuffer.set(chunk, oldBuffer.length);
+    this.receiveBuffer = newBuffer;
+  }
+}
+
+/**
+ * TCP Transport Implementation
+ * Supports multiple concurrent client connections via a server socket
+ */
 export class TcpTransport implements Transport {
   private server: any = null;
-  private socket: any = null;
+  private connections: Map<string, Connection> = new Map();
   private host: string;
   private port: number;
-  private connected: boolean = false;
   private isServer: boolean;
-  private receiveBuffer: Uint8Array = new Uint8Array(0); // Persistent buffer for pipelined messages
-  private bufferListeners: Array<(data: Uint8Array) => void> = []; // Listeners for buffer-ready messages
-  private isBuffering: boolean = false; // Track if we're actively waiting for a receive() call
+  private clientConnectionId?: string; // For client mode (single connection)
 
   constructor(host: string = '127.0.0.1', port: number = 5000, isServer: boolean = false) {
     this.host = host;
@@ -57,25 +114,42 @@ export class TcpTransport implements Transport {
 
   async connect(): Promise<void> {
     const net = await import('net');
-    
+
     if (this.isServer) {
-      // Server mode: create server and listen
+      // Server mode: create server and listen for multiple connections
       this.server = net.createServer((sock: any) => {
-        this.socket = sock;
-        this.connected = true;
+        // Create a unique connection ID for this socket
+        const connId = this.generateConnectionId(sock);
+        const connection = new Connection(connId, sock);
+
+        // Store the connection
+        this.connections.set(connId, connection);
         
-        // Set up persistent data handler that accumulates into receiveBuffer
+        console.log(`[TCP Transport] New connection: ${connId}`);
+
+        // Set up data handler for this connection
         sock.on('data', (chunk: Buffer) => {
-          this.appendToBuffer(chunk);
-          this.checkAndDispatch();
+          connection.appendToBuffer(Uint8Array.from(chunk));
+          connection.resolveReceive?.(connection.extractMessage()!);
         });
-        
+
+        sock.on('end', () => {
+          console.log(`[TCP Transport] Connection closed: ${connId}`);
+          this.connections.delete(connId);
+          if (connection.resolveReceive) {
+            connection.rejectReceive?.(new Error('Connection ended'));
+          }
+        });
+
         sock.on('error', (err: Error) => {
-          console.error(`[TCP Transport] Socket error:`, err);
-          this.connected = false;
+          console.error(`[TCP Transport] Socket error on ${connId}:`, err.message);
+          this.connections.delete(connId);
+          if (connection.resolveReceive) {
+            connection.rejectReceive?.(new Error(err.message));
+          }
         });
       });
-      
+
       return new Promise<void>((resolve, reject) => {
         this.server.once('listening', () => {
           resolve();
@@ -84,258 +158,210 @@ export class TcpTransport implements Transport {
         this.server.listen(this.port, this.host);
       });
     } else {
-      // Client mode: connect to server
-      this.socket = net.createConnection({ host: this.host, port: this.port });
-      
-      // Set up persistent data handler that accumulates into receiveBuffer
-      this.socket.on('data', (chunk: Buffer) => {
-        this.appendToBuffer(chunk);
-        this.checkAndDispatch();
+      // Client mode: single connection
+      this.clientConnectionId = crypto.randomUUID().split('-')[0];
+      const socket = net.createConnection({ host: this.host, port: this.port });
+      const connection = new Connection(this.clientConnectionId, socket);
+
+      socket.on('data', (chunk: Buffer) => {
+        connection.appendToBuffer(Uint8Array.from(chunk));
+        if (!connection.resolveReceive) return;
+        const msg = connection.extractMessage();
+        if (msg) connection.resolveReceive(msg);
+      });
+
+      socket.on('connect', () => {
+        connection.resolveReceive = null; // Will be set when receive() is called
       });
       
-      await new Promise<void>((resolve, reject) => {
-        this.socket.once('connect', () => {
-          this.connected = true;
-          resolve();
-        });
-        this.socket.once('error', (err: Error) => reject(err));
+      socket.on('error', (err: Error) => {
+        if (connection.resolveReceive) {
+          connection.rejectReceive?.(err);
+          connection.rejectReceive?.(new Error(`Connection error: ${err.message}`));
+        }
+      });
+
+      socket.once('connect', () => {
+        this.connections.set(this.clientConnectionId!, connection);
+      });
+      
+      return new Promise<void>((resolve, reject) => {
+        socket.once('connect', () => resolve());
+        socket.once('error', (err: Error) => reject(err));
       });
     }
   }
 
-  /**
-   * Append incoming data chunk to the persistent receive buffer
-   */
-  private appendToBuffer(chunk: Buffer): void {
-    const oldBuffer = this.receiveBuffer;
-    const newBuffer = new Uint8Array(oldBuffer.length + chunk.length);
-    newBuffer.set(oldBuffer, 0);
-    newBuffer.set(Buffer.from(chunk), oldBuffer.length);
-    this.receiveBuffer = newBuffer;
+  private generateConnectionId(socket: any): string {
+    return crypto.randomUUID().split('-')[0];
   }
 
-  /**
-   * Check if we have a complete message in the buffer and notify waiters
-   * Does NOT extract messages from buffer - just dispatches to listeners
-   */
-  private checkAndDispatch(): void {
-    // Loop while we have complete messages in the buffer and listeners waiting
-    while (this.bufferListeners.length > 0) {
-      const message = this.peekCompleteMessage();
-      if (message) {
-        // Dispatch to the first waiting listener (FIFO order)
-        const listener = this.bufferListeners.shift();
-        // Extract the message before dispatching
-        this.extractFromBuffer(message.length);
-        if (listener) {
-          listener(message);
-        }
-      } else {
-        break; // No more complete messages to dispatch
-      }
-    }
-  }
-
-  /**
-   * Peek at the next complete message in the buffer without extracting it
-   * Returns the message if complete, or null if we need more data
-   * Does NOT modify this.receiveBuffer
-   */
-  private peekCompleteMessage(): Uint8Array | null {
-    const data = this.receiveBuffer;
-    const minHeaderBytes = 16; // Basic XDR header
-
-    // Not enough for even the header
-    if (data.length < minHeaderBytes) {
-      return null;
-    }
-
-    try {
-      // Parse the header
-      const header = decode(new Uint8Array(data.subarray(0, 16)));
-
-      // For RPC calls, we need to calculate full message size
-      // Message layout: header(16) + callHeader(32) + msgId + args
-      if (header.type === RpcConstants.CallTypes.RPC_CALL) {
-        const msgIdOffset = 48; // After header(16) + callHeader(32)
-
-        if (data.length <= msgIdOffset + 4) {
-          return null;
-        }
-
-        const msgIdLen = new DataView(data.buffer, data.byteOffset + msgIdOffset, 4).getUint32(0, false);
-        const msgIdEncodedLen = 4 + msgIdLen;
-        const argsOffset = msgIdOffset + msgIdEncodedLen;
-
-        if (data.length < argsOffset + 4) {
-          return null;
-        }
-
-        const argsLen = new DataView(data.buffer, data.byteOffset + argsOffset, 4).getUint32(0, false);
-        const argsPadded = Math.ceil(argsLen / 4) * 4;
-        const messageTotal = 16 + 32 + msgIdEncodedLen + 4 + argsPadded;
-
-        if (data.length < messageTotal) {
-          return null;
-        }
-
-        // Return the complete message WITHOUT extracting
-        return new Uint8Array(data.subarray(0, messageTotal));
-      }
-
-      // For replies (RPC_REPLY)
-      // Format: header(16) + callHeader(32) + msgId(opaque) + result(opaque)
-      if (header.type === RpcConstants.CallTypes.RPC_REPLY) {
-        if (data.length < 48) {
-          return null;
-        }
-
-        let offset = 48;
-        
-        // Check if msgId is present
-        if (data.length < offset + 4) {
-          return null;
-        }
-        
-        const msgIdLen = new DataView(data.buffer, data.byteOffset + offset, 4).getUint32(0, false);
-        if (msgIdLen > 0) {
-          const msgIdPadded = Math.ceil(msgIdLen / 4) * 4;
-          const msgIdTotal = 4 + msgIdPadded;
-          offset += msgIdTotal;
-        }
-
-        // Now parse the result (opaque field)
-        if (data.length < offset + 4) {
-          return null;
-        }
-
-        const resultLen = new DataView(data.buffer, data.byteOffset + offset, 4).getUint32(0, false);
-        const resultPadded = Math.ceil(resultLen / 4) * 4;
-        const resultTotal = 4 + resultPadded;
-        const fullMsgSize = offset + resultTotal;
-
-        if (data.length < fullMsgSize) {
-          return null;
-        }
-
-        return new Uint8Array(data.subarray(0, fullMsgSize));
-      }
-
-      return null;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  /**
-   * Extract N bytes from the front of the receive buffer
-   * @param count - Number of bytes to extract
-   * @returns The extracted bytes, or null if not enough in buffer
-   */
-  private extractFromBuffer(count: number): Uint8Array | null {
-    if (this.receiveBuffer.length < count) {
-      return null;
-    }
-    const extracted = new Uint8Array(this.receiveBuffer.subarray(0, count));
-    this.receiveBuffer = new Uint8Array(this.receiveBuffer.subarray(count));
-    return extracted;
-  }
-
-  /**
-   * Try to parse and extract a complete RPC message from the buffer
-   * Returns the message if complete, or null if we need more data
-   * Modifies this.receiveBuffer by removing the extracted message
-   */
-  private tryParseCompleteMessage(): Uint8Array | null {
-    const msg = this.peekCompleteMessage();
-    if (msg) {
-      this.extractFromBuffer(msg.length);
-      return msg;
-    }
-    return null;
-  }
-
-  async send(data: Uint8Array): Promise<void> {
-    if (!this.socket || !this.connected) {
-      throw new Error('TCP transport not connected');
+  async send(connectionId: string, data: Uint8Array): Promise<void> {
+    const connection = this.connections.get(connectionId);
+    if (!connection || !connection.socket) {
+      throw new Error(`No active connection for ID: ${connectionId}`);
     }
 
     return new Promise<void>((resolve, reject) => {
-      this.socket.write(data, (err?: Error) => {
+      connection.socket.write(data, (err?: Error) => {
         if (err) reject(err);
         else resolve();
       });
     });
   }
 
-  async receive(bufferSize: number): Promise<Uint8Array> {
-    if (!this.socket || !this.connected) {
-      throw new Error('TCP transport not connected');
+  async receive(connectionId: string, bufferSize: number): Promise<Uint8Array> {
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      throw new Error(`No active connection for ID: ${connectionId}`);
     }
 
-    // Check if we already have a complete message in the buffer (without extracting)
-    const cachedMessage = this.peekCompleteMessage();
-    if (cachedMessage) {
-      // Extract it from buffer before returning
-      this.extractFromBuffer(cachedMessage.length);
-      return cachedMessage;
+    // Check if we already have a complete message
+    if (connection.hasCompleteMessage()) {
+      const msg = connection.extractMessage();
+      if (msg) return msg;
     }
 
-    // No complete message ready, register a listener and wait
+    // Wait for incoming data
     return new Promise<Uint8Array>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
-        this.bufferListeners = this.bufferListeners.filter(l => l !== onData);
-        // Check once more if data arrived during cleanup
-        const message = this.tryParseCompleteMessage();
-        if (message) {
-          resolve(message);
-        } else {
-          reject(new Error(`TCP receive timeout: no complete message available (${this.receiveBuffer.length} bytes buffered)`));
+        if (!connection.hasCompleteMessage()) {
+          const buffered = this.connections.get(connectionId);
+          reject(
+            new Error(
+              `Receive timeout: no complete message (${buffered?.receiveBuffer.length || 0} bytes buffered)`
+            )
+          );
         }
-      }, 500); // Reduced timeout for testing
+        if (connection.resolveReceive === resolve) {
+          const msg = connection.extractMessage();
+          if (msg) resolve(msg);
+        }
+      }, 5000); // 5 second timeout
 
-      const onData = (message: Uint8Array) => {
+      connection.resolveReceive = (msg) => {
         clearTimeout(timeoutHandle);
-        this.bufferListeners = this.bufferListeners.filter(l => l !== onData);
-        resolve(message);
+        connection.resolveReceive = null;
+        resolve(msg);
       };
 
-      this.bufferListeners.push(onData);
-        
-      // Check immediately in case data arrived just now
-      this.checkAndDispatch();
-    });
-  }
+      connection.rejectReceive = (err) => {
+        clearTimeout(timeoutHandle);
+        connection.resolveReceive = null;
+        reject(err);
+      };
 
-  async close(): Promise<void> {
-    // Clear any pending listeners
-    this.bufferListeners = [];
-    
-    if (this.isServer && this.server) {
-      this.server.close();
-    }
-    if (this.socket) {
-      this.socket.destroy();
-      this.connected = false;
-    }
-    // Clear the receive buffer
-    this.receiveBuffer = new Uint8Array(0);
-  }
-
-  isConnected(): boolean {
-    return this.connected && this.socket && !this.socket.destroyed;
-  }
-  
-  // For server mode, signal that we have an incoming connection
-  async waitForConnection(): Promise<void> {
-    if (!this.isServer) return;
-    return new Promise<void>((resolve, reject) => {
-      if (this.connected && this.socket) {
-        resolve();
-      } else {
-        this.server.once('connection', () => resolve());
-        setTimeout(() => reject(new Error('Connection wait timeout')), 15000);
+      // Check immediately if data already arrived
+      if (connection.hasCompleteMessage()) {
+        clearTimeout(timeoutHandle);
+        connection.resolveReceive = null;
+        const msg = connection.extractMessage();
+        if (msg) resolve(msg);
       }
     });
   }
+
+  async close(connectionId: string): Promise<void> {
+    const connection = this.connections.get(connectionId);
+    if (connection) {
+      if (connection.resolveReceive) {
+        connection.rejectReceive?.(new Error('Connection closed'));
+      }
+      connection.socket.destroy();
+      this.connections.delete(connectionId);
+    }
+  }
+
+  isConnected(connectionId: string): boolean {
+    const connection = this.connections.get(connectionId);
+    return !!(connection && connection.socket && !connection.socket.destroyed);
+  }
+
+  getConnectionId(socket: any): string | undefined {
+    for (const [connId, conn] of this.connections) {
+      if (conn.socket === socket) return connId;
+    }
+    
+    // Also check client mode
+    if (!this.isServer && this.clientConnectionId && this.connections.has(this.clientConnectionId)) {
+      const conn = this.connections.get(this.clientConnectionId);
+      if (conn?.socket === socket) return this.clientConnectionId;
+    }
+    
+    return undefined;
+  }
+
+  /**
+   * Server-side: accept a new connection
+   * Returns the connection ID for the newly connected client
+   */
+  async acceptConnection(): Promise<string> {
+    if (!this.isServer) {
+      throw new Error('acceptConnection() is only available in server mode');
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      // Check if there's already a connection waiting
+      for (const [id, conn] of this.connections) {
+        if (conn.socket && !this.connections.has(id)) {
+          resolve(id);
+          return;
+        }
+      }
+
+      this.server.once('connection', (sock: any) => {
+        const connId = this.generateConnectionId(sock);
+        resolve(connId);
+      });
+
+      setTimeout(() => {
+        reject(new Error('No client connected within timeout'));
+      }, 10000);
+    });
+  }
+
+  /**
+   * Server shutdown: close all connections and the server
+   */
+  async shutdown(): Promise<void> {
+    for (const connId of this.connections.keys()) {
+      await this.close(connId);
+    }
+    
+    if (this.server) {
+      this.server.close();
+      this.server = null;
+    }
+    this.connections.clear();
+  }
+
+  /**
+   * Get count of active connections
+   */
+  getConnectionCount(): number {
+    return this.connections.size;
+  }
+}
+
+/**
+ * Abstract base for other transport implementations (UDP, Unix socket, shared memory)
+ */
+export abstract class MultiplexedTransport implements Transport {
+  abstract connect(): Promise<void>;
+  abstract send(connectionId: string, data: Uint8Array): Promise<void>;
+  abstract receive(connectionId: string, bufferSize: number): Promise<Uint8Array>;
+  abstract close(connectionId: string): Promise<void>;
+  abstract isConnected(connectionId: string): boolean;
+  abstract getConnectionId(socket: any): string | undefined;
+}
+
+/**
+ * Factory function to create TCP transport
+ */
+export function createTcpTransport(
+  host: string = '127.0.0.1',
+  port: number = 5000,
+  isServer: boolean = false
+): TcpTransport {
+  return new TcpTransport(host, port, isServer);
 }
