@@ -47,21 +47,8 @@ export class RpcClient {
 
     try {
       await this.transport.connect();
-      
-      // For client mode, the transport assigns us a connection ID
-      // In server mode we might receive one from acceptConnection
-      if (!this.transport.isConnected('')) {
-        // Try common connection ID formats
-        for (const [id, conn] of this.transport.connections!) {
-          if ((conn as any).socket && (conn as any).socket.remoteAddress === this.transport.host) {
-            this.connectionId = id;
-            break;
-          }
-        }
-      }
-      
       this.connected = true;
-      console.log(`[RPC Client] Connected, connectionId=${this.connectionId || 'auto'}`);
+      console.log(`[RPC Client] Connected`);
     } catch (error) {
       this.connected = false;
       throw new Error(`Connection failed: ${error}`);

@@ -159,7 +159,7 @@ export class TcpTransport implements Transport {
       });
     } else {
       // Client mode: single connection
-      this.clientConnectionId = crypto.randomUUID().split('-')[0];
+      this.clientConnectionId = crypto.randomUUID().split('-')[0]!;
       const socket = net.createConnection({ host: this.host, port: this.port });
       const connection = new Connection(this.clientConnectionId, socket);
 
@@ -193,7 +193,7 @@ export class TcpTransport implements Transport {
   }
 
   private generateConnectionId(socket: any): string {
-    return crypto.randomUUID().split('-')[0];
+    return crypto.randomUUID().split('-')[0]!;
   }
 
   async send(connectionId: string, data: Uint8Array): Promise<void> {
@@ -237,7 +237,7 @@ export class TcpTransport implements Transport {
           const msg = connection.extractMessage();
           if (msg) resolve(msg);
         }
-      }, 5000); // 5 second timeout
+      }, 5000);
 
       connection.resolveReceive = (msg) => {
         clearTimeout(timeoutHandle);
@@ -257,6 +257,8 @@ export class TcpTransport implements Transport {
         connection.resolveReceive = null;
         const msg = connection.extractMessage();
         if (msg) resolve(msg);
+      } else {
+        // No data yet, the resolve will be called when socket data arrives
       }
     });
   }
@@ -282,13 +284,20 @@ export class TcpTransport implements Transport {
       if (conn.socket === socket) return connId;
     }
     
-    // Also check client mode
-    if (!this.isServer && this.clientConnectionId && this.connections.has(this.clientConnectionId)) {
+    if (!this.isServer && this.clientConnectionId) {
       const conn = this.connections.get(this.clientConnectionId);
       if (conn?.socket === socket) return this.clientConnectionId;
     }
     
     return undefined;
+  }
+
+  getConnectionsWithSocket(): MapIterator<[string, Connection]> {
+    return this.connections.entries();
+  }
+
+  getHost(): string {
+    return this.host;
   }
 
   /**
