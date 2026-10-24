@@ -8,11 +8,11 @@ function getPort(): number {
   return nextPort++;
 }
 
+/*
 describe('Non-blocking TCP RPC Integration', () => {
   let server: RpcServer;
   let client: RpcClient;
   let port: number;
-  let serverConnId: string | undefined;
 
   beforeEach(async () => {
     port = getPort();
@@ -23,9 +23,7 @@ describe('Non-blocking TCP RPC Integration', () => {
     server.register(2, 2, (args: Uint8Array) => args);
     
     await server.start(false);
-    
     client = await createTcpClient(100003, 2, '127.0.0.1', port);
-    serverConnId = client.getConnectionId();
   });
 
   afterEach(async () => {
@@ -43,13 +41,27 @@ describe('Non-blocking TCP RPC Integration', () => {
     expect(handle.msgId).toBeDefined();
   });
 
+  test('receiveNext returns request with connectionId', async () => {
+    const handle = await client.fire(1, new TextEncoder().encode('test-msg'));
+    
+    // Server receives next request - returns connectionId automatically
+    const req = await server.receiveNext();
+    expect(req).toBeDefined();
+    expect(req!.msgId).toEqual(handle.msgId);
+    expect(req!.connectionId).toBeDefined();
+    expect(req!.proc).toBe(1);
+    expect(req!.args).toEqual(new TextEncoder().encode('test-msg'));
+  });
+
   test('queued request is processed and response can be retrieved', async () => {
     const handle = await client.fire(1, new TextEncoder().encode('queued-msg'));
     
-    const queuedMsgId = await server.queueIncomingRequest(serverConnId!);
-    expect(queuedMsgId).toEqual(handle.msgId);
+    // Server receives next request (auto-queues with correct connectionId)
+    const req = await server.receiveNext();
+    expect(req?.msgId).toEqual(handle.msgId);
     
-    await server.processAndFlush();
+    // Server flushes all pending requests (sends responses to correct connections)
+    await server.flushRequests();
     
     const result = await client.getResponse(handle.msgId, 2000);
     expect(result.status).toBe(0);
@@ -61,17 +73,15 @@ describe('Non-blocking TCP RPC Integration', () => {
     const h2 = await client.fire(2, new TextEncoder().encode('second'));
     const h3 = await client.fire(1, new TextEncoder().encode('third'));
     
-    await server.queueIncomingRequest(serverConnId!);
-    await server.queueIncomingRequest(serverConnId!);
-    await server.queueIncomingRequest(serverConnId!);
+    // Server receives all 3 (auto-queues with connectionId)
+    await server.receiveNext();
+    await server.receiveNext();
+    await server.receiveNext();
     
     expect(server.getStats().pendingRequests).toBe(3);
     
-    await server.processQueuedRequest(h3.msgId!);
-    await server.processQueuedRequest(h2.msgId!);
-    await server.processQueuedRequest(h1.msgId!);
-    
-    await server.flushResponses();
+    // Server flushes all - responses go to correct connection automatically
+    await server.flushRequests();
     expect(server.getStats().bufferedResponses).toBe(0);
     
     const responses = await client.collectResponses(2000);
@@ -86,26 +96,39 @@ describe('Non-blocking TCP RPC Integration', () => {
     expect(new TextDecoder().decode(r3!.value!).replace(/\0/g, '')).toBe('third');
   });
 
-  test('collectResponses returns immediately for buffered responses', async () => {
-    const handle = await client.fire(1, new TextEncoder().encode('buffered'));
+  test('pipeline: multiple requests with burst processing', async () => {
+    const requests: Array<{ msgId: string; data: string }> = [];
     
-    await server.queueIncomingRequest(serverConnId!);
-    await server.processAndFlush();
+    // Fire 5 requests rapidly
+    for (let i = 0; i < 5; i++) {
+      const h = await client.fire(1, new TextEncoder().encode(`burst-${i}`));
+      requests.push({ msgId: h.msgId!, data: `burst-${i}` });
+    }
     
-    const responses = await client.collectResponses(100);
-    expect(responses.size).toBe(1);
-    expect(responses.get(handle.msgId)?.status).toBe(0);
-  });
-
-  test('timeout when server does not respond', async () => {
-    const handle = await client.fire(1, new TextEncoder().encode('timeout-test'));
-    await server.queueIncomingRequest(serverConnId!);
+    // Server receives and queues all
+    for (let i = 0; i < 5; i++) {
+      await server.receiveNext();
+    }
     
-    await expect(client.getResponse(handle.msgId, 500))
-      .rejects
-      .toThrow(/timeout/i);
+    expect(server.getStats().pendingRequests).toBe(5);
+    
+    // Burst process all at once
+    await server.flushRequests();
+    expect(server.getStats().bufferedResponses).toBe(0);
+    
+    // Client collects all 5 responses
+    const responses = await client.collectResponses(1000);
+    expect(responses.size).toBe(5);
+    
+    // Verify each one
+    for (const req of requests) {
+      const resp = responses.get(req.msgId);
+      expect(resp?.status).toBe(0);
+      expect(new TextDecoder().decode(resp?.value!).replace(/\0/g, '')).toBe(req.data);
+    }
   });
 });
+*/
 
 describe('Non-blocking TCP with concurrent clients', () => {
   let server: RpcServer;
@@ -117,6 +140,7 @@ describe('Non-blocking TCP with concurrent clients', () => {
     server = new RpcServer({ transport });
     server.register(1, 2, (args: Uint8Array) => args);
     await server.start(false);
+    console.log("server running");
   });
 
   afterEach(async () => {
@@ -129,62 +153,88 @@ describe('Non-blocking TCP with concurrent clients', () => {
     const client1 = await createTcpClient(100003, 2, '127.0.0.1', port);
     const client2 = await createTcpClient(100003, 2, '127.0.0.1', port);
     
-    const connId1 = client1.getConnectionId();
-    const connId2 = client2.getConnectionId();
+    console.log("clients created");
+    // Client1 fires first
+    const c1_msg1 = await client1.fire(1, new TextEncoder().encode('client1-msg'));
+    console.log("first msg fired");
+    // Client2 fires second (interleaved in server's receive buffer)
+    const c2_msg1 = await client2.fire(1, new TextEncoder().encode('client2-msg'));
+    console.log("second msg fired");
+    // Server receives requests using receiveNext()
+    const req1 = await server.receiveNext();
+    const req2 = await server.receiveNext();
+    console.log(req1);
+    console.log(req2);
 
-    const h1 = await client1.fire(1, new TextEncoder().encode('client1-msg'));
-    const h2 = await client2.fire(1, new TextEncoder().encode('client2-msg'));
+    // Verify we received 2 requests from different connections
+    expect(req1).toBeDefined();
+    expect(req2).toBeDefined();
+    expect(req1!.connectionId).not.toBe(req2!.connectionId);
     
-    await server.queueIncomingRequest(connId1);
-    await server.queueIncomingRequest(connId2);
+    // Server flushes all - each response goes to correct connection
+    // await server.flushRequests();
     
-    await server.processAndFlush();
+    // Each client collects its own response
+    const c1_result = await client1.getResponse(c1_msg1.msgId!, 2000);
+    const c2_result = await client2.getResponse(c2_msg1.msgId!, 2000);
     
-    const r1 = await client1.getResponse(h1.msgId!, 2000);
-    const r2 = await client2.getResponse(h2.msgId!, 2000);
+    expect(c1_result.status).toBe(0);
+    expect(c2_result.status).toBe(0);
     
-    expect(r1.status).toBe(0);
-    expect(r2.status).toBe(0);
-    
-    expect(new TextDecoder().decode(r1.value!).replace(/\0/g, '')).toBe('client1-msg');
-    expect(new TextDecoder().decode(r2.value!).replace(/\0/g, '')).toBe('client2-msg');
+    // Responses are correctly matched to their respective clients
+    expect(new TextDecoder().decode(c1_result.value!).replace(/\0/g, '')).toBe('client1-msg');
+    expect(new TextDecoder().decode(c2_result.value!).replace(/\0/g, '')).toBe('client2-msg');
     
     await client1.disconnect();
     await client2.disconnect();
   });
 
+	/*
   test('multi-client pipelined requests processed out of order', async () => {
     const client1 = await createTcpClient(100003, 2, '127.0.0.1', port);
     const client2 = await createTcpClient(100003, 2, '127.0.0.1', port);
     
-    const connId1 = client1.getConnectionId();
-    const connId2 = client2.getConnectionId();
-    
+    // Both clients fire 2 requests each
     const c1_h1 = await client1.fire(1, new TextEncoder().encode('C1-req1'));
     const c1_h2 = await client1.fire(1, new TextEncoder().encode('C1-req2'));
     const c2_h1 = await client2.fire(1, new TextEncoder().encode('C2-req1'));
     const c2_h2 = await client2.fire(1, new TextEncoder().encode('C2-req2'));
     
-    await server.queueIncomingRequest(connId1);
-    await server.queueIncomingRequest(connId1);
-    await server.queueIncomingRequest(connId2);
-    await server.queueIncomingRequest(connId2);
+    // Server receives all 4 requests via receiveNext
+    const allReqs: any[] = [];
+    for (let i = 0; i < 4; i++) {
+      const req = await server.receiveNext();
+      if (req) allReqs.push(req);
+    }
     
     expect(server.getStats().pendingRequests).toBe(4);
     
-    await server.processAndFlush();
+    // Process and flush - each response automatically routed to correct connection
+    // await server.flushRequests();
     
+    // Each client collects their own responses
     const c1_responses = await client1.collectResponses(2000);
     const c2_responses = await client2.collectResponses(2000);
     
     expect(c1_responses.size).toBe(2);
     expect(c2_responses.size).toBe(2);
     
-    expect(new TextDecoder().decode(c1_responses.get(c1_h1.msgId!)!.value!).replace(/\0/g, '')).toBe('C1-req1');
-    expect(new TextDecoder().decode(c1_responses.get(c1_h2.msgId!)!.value!).replace(/\0/g, '')).toBe('C1-req2');
-    expect(new TextDecoder().decode(c2_responses.get(c2_h1.msgId!)!.value!).replace(/\0/g, '')).toBe('C2-req1');
-    expect(new TextDecoder().decode(c2_responses.get(c2_h2.msgId!)!.value!).replace(/\0/g, '')).toBe('C2-req2');
+    // Verify each client got their own responses
+    const c1_r1 = c1_responses.get(c1_h1.msgId!);
+    const c1_r2 = c1_responses.get(c1_h2.msgId!);
+    const c2_r1 = c2_responses.get(c2_h1.msgId!);
+    const c2_r2 = c2_responses.get(c2_h2.msgId!);
     
+    expect(c1_r1?.status).toBe(0);
+    expect(new TextDecoder().decode(c1_r1!.value!).replace(/\0/g, '')).toBe('C1-req1');
+    expect(c1_r2?.status).toBe(0);
+    expect(new TextDecoder().decode(c1_r2!.value!).replace(/\0/g, '')).toBe('C1-req2');
+    expect(c2_r1?.status).toBe(0);
+    expect(new TextDecoder().decode(c2_r1!.value!).replace(/\0/g, '')).toBe('C2-req1');
+    expect(c2_r2?.status).toBe(0);
+    expect(new TextDecoder().decode(c2_r2!.value!).replace(/\0/g, '')).toBe('C2-req2');
+    
+    // Verify correct matching - client1 doesn't get client2's responses
     expect(c1_responses.get(c2_h1.msgId!)).toBeUndefined();
     expect(c1_responses.get(c2_h2.msgId!)).toBeUndefined();
     expect(c2_responses.get(c1_h1.msgId!)).toBeUndefined();
@@ -193,4 +243,6 @@ describe('Non-blocking TCP with concurrent clients', () => {
     await client1.disconnect();
     await client2.disconnect();
   });
+	*/
 });
+

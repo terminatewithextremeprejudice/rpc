@@ -66,6 +66,7 @@ export class Connection {
    */
   hasCompleteMessage(): boolean {
     const size = messageSize(this.receiveBuffer);
+    console.log("has complete message", size, this.receiveBuffer);
     return size > 0;
   }
 
@@ -129,6 +130,7 @@ export class TcpTransport implements Transport {
 
         // Set up data handler for this connection
         sock.on('data', (chunk: Buffer) => {
+	  console.log("got data on", chunk);						
           connection.appendToBuffer(Uint8Array.from(chunk));
           connection.resolveReceive?.(connection.extractMessage()!);
         });
@@ -164,6 +166,7 @@ export class TcpTransport implements Transport {
       const connection = new Connection(this.clientConnectionId, socket);
 
       socket.on('data', (chunk: Buffer) => {
+	console.log('data on socket');
         connection.appendToBuffer(Uint8Array.from(chunk));
         if (!connection.resolveReceive) return;
         const msg = connection.extractMessage();
@@ -202,6 +205,7 @@ export class TcpTransport implements Transport {
       throw new Error(`No active connection for ID: ${connectionId}`);
     }
 
+    console.log("send", connectionId, data);
     return new Promise<void>((resolve, reject) => {
       connection.socket.write(data, (err?: Error) => {
         if (err) reject(err);
@@ -216,6 +220,7 @@ export class TcpTransport implements Transport {
       throw new Error(`No active connection for ID: ${connectionId}`);
     }
 
+    console.log("received", connectionId);
     // Check if we already have a complete message
     if (connection.hasCompleteMessage()) {
       const msg = connection.extractMessage();
@@ -327,6 +332,7 @@ export class TcpTransport implements Transport {
     if (!this.clientConnectionId) {
       throw new Error('Not connected');
     }
+    console.log("client send", data);
     return this.send(this.clientConnectionId, data);
   }
 

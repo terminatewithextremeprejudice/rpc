@@ -136,7 +136,13 @@ export class RpcServer {
     // Try to receive from each connection until we find one with a message
     for (const [connId] of this.transport.getConnections()) {
       try {
-        // Check if this connection has a complete message (non-blocking peek)
+        if (!this.hasMessageReady(connId)) {
+		console.log("no message was ready for", connId);
+		continue;				
+	}
+
+	console.log("got message for", connId);
+	// Check if this connection has a complete message (non-blocking peek)
         // For now, we try receive and catch if no message is available
         const message = await this.transport.receive(connId, 1024);
         
