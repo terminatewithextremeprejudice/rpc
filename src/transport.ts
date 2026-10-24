@@ -286,7 +286,35 @@ export class TcpTransport implements Transport {
     if (this.isServer) {
       return this.connections.size > 0;
     }
-    return this.clientConnectionId ? this.isConnected(this.clientConnectionId) : false;
+    return this.clientConnectionId ? this.isConnected(this.clientConnectionId!) : false;
+  }
+
+  /**
+   * Get list of connection IDs that have messages ready (non-blocking)
+   */
+  getReadyConnections(): string[] {
+    const ready: string[] = [];
+    for (const [connId, conn] of this.connections) {
+      if (conn.hasCompleteMessage()) {
+        ready.push(connId);
+      }
+    }
+    return ready;
+  }
+
+  /** 
+   * Get specific connection 
+   */ 
+  getConnectionById(connectionId: string): Connection | undefined {
+    return this.connections.get(connectionId)
+  }
+
+  /**
+   * Get info for specific connection (non-blocking)
+   */
+  getConnection(hasCompleteMessage: boolean): boolean {
+    const conn = this.connections.get('');
+    return conn?.hasCompleteMessage() || false;
   }
 
   /**
@@ -342,6 +370,10 @@ export class TcpTransport implements Transport {
   }
 
   getConnectionsWithSocket(): MapIterator<[string, Connection]> {
+    return this.connections.entries();
+  }
+
+  getConnections(): MapIterator<[string, Connection]> {
     return this.connections.entries();
   }
 

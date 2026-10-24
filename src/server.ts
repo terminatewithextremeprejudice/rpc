@@ -2,7 +2,7 @@
 // Handles incoming XDR-encoded RPC calls with multi-client support
 
 import { decode, encode, encodeCall, decodeCall, encodeString, decodeOpaque, type XDRHeader, RpcConstants } from './shared/xdr';
-import { Connection, TcpTransport } from './transport';
+import { TcpTransport } from './transport';
 
 export interface RpcHandler {
   procedure: number;
@@ -25,7 +25,6 @@ export interface QueuedRequest {
 
 export class RpcServer {
   private transport: TcpTransport;
-  private handlers: Map<string, RpcHandler> = new Map();
   private running: boolean = false;
   private handlerRegistry: Map<string, RpcHandler> = new Map();
   
@@ -135,7 +134,7 @@ export class RpcServer {
     }
 
     // Try to receive from each connection until we find one with a message
-    for (const [connId] of this.transport.connections) {
+    for (const [connId] of this.transport.getConnections()) {
       try {
         // Check if this connection has a complete message (non-blocking peek)
         // For now, we try receive and catch if no message is available
@@ -297,6 +296,28 @@ export class RpcServer {
    */
   isRunning(): boolean {
     return this.running;
+  }
+
+   /**
+   * Check if a connection has a complete message ready (non-blocking)
+   */
+  hasMessageReady(connectionId: string): boolean {
+    const connection = this.transport.getConnectionById(connectionId);
+    if (!connection) return false;
+    return connection.hasCompleteMessage();
+  }
+
+  /**
+   * Get list of connection IDs that have messages ready
+   */
+  getReadyConnections(): string[] {
+    const ready: string[] = [];
+    for (const [connId, conn] of this.transport.getConnections()) {
+      if (conn.hasCompleteMessage()) {
+        ready.push(connId);
+      }
+    }
+    return ready;
   }
 
   /**
