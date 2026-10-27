@@ -1,5 +1,6 @@
 // Transport abstraction layer for RPC
-import { decode, RpcConstants, messageSize } from './shared/xdr';
+import net from 'net';
+import { messageSize } from './shared/xdr';
 
 // Generic transport layer for RPC.
 //
@@ -333,6 +334,17 @@ export abstract class Transport {
   }
 }
 
+/**
+ * Framer for the XDR RPC wire format: message boundaries are derived from
+ * the XDR fields themselves (see messageSize in shared/xdr), no external
+ * length prefix needed.
+ */
+export class XdrFramer implements MessageFramer {
+  messageSize(buffer: Uint8Array): number {
+    return messageSize(buffer);
+  }
+}
+
 export interface TcpTransportOptions {
   host?: string;
   port?: number;
@@ -340,15 +352,33 @@ export interface TcpTransportOptions {
   framer?: MessageFramer; // framing to split the byte stream into messages
 }
 
+/**
+ * TCP transport for the generic Transport layer.
+ *
+ * - Server mode (`isServer: true`): `connect()` starts listening on
+ *   host:port, and every accepted socket becomes its own Connection,
+ *   so many concurrent clients can be handled at once.
+ * - Client mode (`isServer: false`): `connect()` opens a single socket
+ *   to host:port and registers it as a Connection.
+ *
+ * Byte buffering, message framing, event bus, and receive queue all
+ * live on the base Transport/Connection classes — this class merely
+ * wires `net` sockets into them.
+ */
 export class TcpTransport extends Transport {
-  private server: { close(cb?: () => void): void } | null = null;
+  private server: net.Server | null = null;
+  private clientSocket: net.Socket | null = null;
   private readonly host: string;
   private readonly port: number;
   private readonly isServer: boolean;
   private active = false;
 
   constructor(options: TcpTransportOptions = {}) {
-    super(options.framer ?? new LengthPrefixedFramer());
+    // The XDR wire format is self-describing (message size derived from
+    // header fields), so that's this library's default framing.
+    // Pass `framer: new LengthPrefixedFramer()` for an explicit
+    // length-prefixed protocol instead.
+    super(options.framer ?? new XdrFramer());
     this.host = options.host ?? '127.0.0.1';
     this.port = options.port ?? 5000;
     this.isServer = options.isServer ?? false;
@@ -356,11 +386,152 @@ export class TcpTransport extends Transport {
 
   get hostname(): string { return this.host; }
   get portNumber(): number { return this.port; }
+  get actualPort(): number {
+    const addr = this.server?.address();
+    return addr !== null && typeof addr === 'object' ? addr.port : this.port;
+  }
 
-  override async connect(): Promise<void> {}
-  override async close(connectionId: string): Promise<void> {}
-  override async send(connectionId: string, data: Uint8Array): Promise<void> {}
-  override async closeAll(): Promise<void> {}
-  
-  private wireSocket(socket: import('net').Socket): string {}
+  // ----- channel operations (abstract Transport API) -----
+  override connect(): Promise<void> {
+    if (this.active) return Promise.resolve();
+    const started = this.isServer ? this.startListening() : this.connectClientSocket
+();
+    return started.then(() => { this.active = true; });
+  }
+
+  override send(connectionId: string, data: Uint8Array): Promise<void> {
+    const conn = this.connection(connectionId);
+    if (!conn || conn.isClosed) {
+      return Promise.reject(new Error(`Cannot send: no active connection ${connectionId}`));
+    }
+    const socket = conn.channel as net.Socket;
+    if (!socket || socket.destroyed) {
+      return Promise.reject(new Error(`Cannot send: socket for ${connectionId} has been closed`));
+    }
+    // Resolve when the bytes have actually been flushed, i.e. naturally
+    // applies backpressure to a stalled peer.
+    return new Promise<void>((resolve, reject) => {
+      socket.write(data, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  override close(connectionId: string): Promise<void> {
+    const conn = this.connection(connectionId);
+    if (!conn) return Promise.resolve(); // idempotent
+    const socket = conn.channel as net.Socket | null;
+    if (!socket || socket.destroyed) return Promise.resolve();
+    // Graceful shutdown: let the peer close, but don't wait forever.
+    return new Promise<void>((resolve) => {
+      const bail = setTimeout(() => socket.destroy(), 1000);
+      bail.unref?.();
+      socket.once('close', () => {
+        clearTimeout(bail);
+        resolve();
+      });
+      socket.end();
+    });
+  }
+
+  override closeAll(): Promise<void> {
+    const closes = this.connectionIds().map((id) => {
+      // Never fail because one connection is already gone.
+      return this.close(id).catch(() => undefined);
+    });
+    return Promise.all([...closes, this.stopListening()]).then(() => {
+      this.active = false;
+    });
+  }
+
+  // ----- internals -----
+  private startListening(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const server = net.createServer((socket: net.Socket) => {
+        this.wireSocket(socket);
+      });
+      this.server = server;
+      let settled = false;
+      server.on('error', (err: Error) => {
+        if (!settled) {
+          settled = true;
+          this.server = null;
+          reject(err);
+        } else {
+          // Transport-level error after bind: report on the event bus
+          // (connectionId '' = not tied to a specific connection).
+          this.emitError('', err);
+        }
+      });
+      server.once('listening', () => {
+        settled = true;
+        resolve();
+      });
+      server.listen(this.port, this.host);
+    });
+  }
+
+  private stopListening(): Promise<void> {
+    const server = this.server;
+    this.server = null;
+    if (!server || !server.listening) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      server.once('close', () => resolve());
+      server.close();
+    });
+  }
+
+  private connectClientSocket(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const socket = net.connect({ host: this.host, port: this.port });
+      let settled = false;
+
+      const settle = () => {
+        socket.removeListener('connect', onConnect);
+        socket.removeListener('error', onError);
+        socket.removeListener('close', onClose);
+      };
+      const onConnect = () => {
+        if (settled) return;
+        settled = true;
+        settle();
+        this.clientSocket = socket;
+        this.wireSocket(socket);
+        resolve();
+      };
+      const onError = (err: Error) => {
+        if (!settled) { settled = true; settle(); socket.destroy(); reject(err); }
+
+      };
+      const onClose = () => {
+        if (!settled) { settled = true; settle(); socket.destroy(); reject(new Error(`Connection to ${this.host}:${this.port} dropped before it was established`)); }
+
+      };
+      socket.once('connect', onConnect);
+      socket.once('error', onError);
+      socket.once('close', onClose);
+    });
+  }
+
+  // Register a live socket as a Connection and route its raw socket events
+  // into the Transport's event bus. Returns the connection ID.
+  private wireSocket(socket: net.Socket): string {
+    const conn = this.registerConnection(socket);
+    const id = conn.id;
+
+    socket.on('data', (chunk: Buffer) => {
+      if (conn.isClosed) return;
+      const drained = conn.append(chunk);
+      if (drained > 0) this.emitMessage(id);
+    });
+
+    socket.on('error', (err: Error) => {
+      this.emitError(id, err);
+    });
+
+    socket.once('close', () => {
+      if (this.clientSocket === socket) this.clientSocket = null;
+      this.unregisterConnection(id, 'connection closed');
+    });
+
+    return id;
+  }
 }
