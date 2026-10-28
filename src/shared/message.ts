@@ -53,7 +53,7 @@ export function parseMessage(message: Uint8Array): ParsedMessage {
     }
   }
 
-  let body = new Uint8Array(0);
+  let body: Uint8Array = new Uint8Array(0);
   if (offset + 4 <= message.length) {
     body = decodeOpaque(message, offset);
   }
