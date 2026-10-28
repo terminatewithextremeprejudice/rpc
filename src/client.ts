@@ -1,11 +1,15 @@
-// RPC Client Implementation
-// Encodes RPC calls and sends them through the configured transport
+// RPC client implementation
+// Encodes RPC calls and transmits them through the configured transport.
+// Matching replies to calls is done via msgId, so out-of-order /
+// interleaved replies (pipelined calls) get routed to the correct
+// caller.
 
-import { encode, decode, encodeCall, encodeString, RpcConstants, type XDRHeader } from './shared/xdr';
+import { RpcConstants } from './shared/xdr';
+import { buildCall, parseMessage } from './shared/message';
 import { Transport, TcpTransport } from './transport';
 
 export interface RpcClientOptions {
-  transport: TcpTransport;
+  transport: Transport;
   timeout?: number;
 }
 
@@ -23,230 +27,183 @@ export interface AsyncRpcHandle {
 }
 
 export class RpcClient {
-  private transport: TcpTransport;
-  private prognum: number;
-  private vers: number;
-  private timeout: number;
-  private connected: boolean = false;
+  private readonly prognum: number;
+  private readonly vers: number;
+  private readonly timeout: number;
+  private readonly transport: Transport;
+  private connectionId: string | undefined;
+  private connected = false;
 
-  // Pending responses: msgId -> raw buffer
-  private pendingResponses: Map<string, Buffer> = new Map();
+  // Replies that arrived out of order, waiting for their caller: msgId -> raw
+  private readonly replyCache = new Map<string, Uint8Array>();
 
   constructor(prognum: number, vers: number, options: RpcClientOptions) {
     this.prognum = prognum;
     this.vers = vers;
     this.transport = options.transport;
-    this.timeout = options.timeout || 5000;
+    this.timeout = options.timeout ?? Transport.DEFAULT_TIMEOUT_MS;
   }
 
   async connect(): Promise<void> {
-    if (this.connected) {
-      return;
+    if (this.connected) return;
+    await this.transport.connect();
+    this.connectionId = this.transport.connectionIds()[0];
+    if (!this.connectionId) {
+      throw new Error('Transport connected but exposed no connection');
     }
-
-    try {
-      await this.transport.connect();
-      this.connected = true;
-      console.log(`[RPC Client] Connected`);
-    } catch (error) {
-      this.connected = false;
-      throw new Error(`Connection failed: ${error}`);
-    }
+    this.connected = true;
   }
 
   async disconnect(): Promise<void> {
-    if (!this.connected) {
-      return;
-    }
-
-    await this.transport.clientClose();
+    if (!this.connected && this.connectionId === undefined) return;
+    await this.transport.closeAll();
     this.connected = false;
-    this.pendingResponses.clear();
-    console.log(`[RPC Client] Disconnected from server`);
+    this.connectionId = undefined;
+    this.replyCache.clear();
+  }
+
+  isConnected(): boolean {
+    return this.connected && this.connectionId !== undefined
+      && this.transport.isConnected(this.connectionId);
+  }
+
+  getTransport(): Transport {
+    return this.transport;
   }
 
   /**
-   * Get the connection ID for this client's transport
-   * Client doesn't need to track this - just sends/receives on its socket
+   * Call a procedure.
+   * - Synchronous (default): waits for the reply matching this call's msgId.
+   * - `async: true`: returns an AsyncRpcHandle immediately (fire & forget);
+   *   retrieve the reply later with getResponse() / collectResponses().
    */
-  getConnectionId(): string {
-    // Client mode: the transport handles connection tracking internally
-    // This is only used for logging/identification purposes
-    return 'client';
+  async call(
+    proc: number,
+    args: Uint8Array = new Uint8Array(0),
+    options?: { async?: boolean; msgId?: string; timeout?: number },
+  ): Promise<RpcCallResult | AsyncRpcHandle> {
+    if (!this.isConnected()) await this.connect();
+    const connectionId = this.requireConnection();
+    const callMsgId = options?.msgId ?? this.generateMsgId();
+    const timeout = options?.timeout ?? this.timeout;
+
+    const message = buildCall(this.prognum, this.vers, proc, callMsgId, args);
+    await this.transport.send(connectionId, message);
+
+    if (options?.async) {
+      return { _async: true, msgId: callMsgId, proc, connectionId };
+    }
+    const reply = await this.readReply(callMsgId, timeout);
+    return this.decodeResult(reply, callMsgId);
   }
 
-  async call(proc: number, args: Uint8Array = new Uint8Array(0), options?: {
-    async?: boolean;
-    msgId?: string;
-    timeout?: number;
-  }): Promise<RpcCallResult | AsyncRpcHandle> {
-    if (!this.connected) {
-      await this.connect();
-    }
-
-    if (!this.transport.clientIsConnected()) {
-      throw new Error('Not connected to server');
-    }
-
-    const useAsync = options?.async === true;
-    const callMsgId = options?.msgId || this.generateMsgId();
-    const callTimeout = options?.timeout ?? this.timeout;
-
-    const callHeader: XDRHeader = {
-      version: RpcConstants.RPC_VERSION,
-      type: RpcConstants.CallTypes.RPC_CALL,
-      headerLength: 16,
-      authType: RpcConstants.AuthFlavors.AUTH_NULL
-    };
-
-    const encodedCallHeader = encodeCall(
-      this.prognum,
-      this.vers,
-      proc,
-      callHeader
-    );
-
-    const encodedMsgId = encodeString(callMsgId as string);
-    const encodedArgs = this.encodeOpaqueArgs(args);
-    const fullCall = new Uint8Array(
-      [...new Uint8Array(16), ...encodedCallHeader, ...encodedMsgId, ...encodedArgs]
-    );
-
-    console.log(
-      `[RPC Client] Sending CALL: prog=${this.prognum}, vers=${this.vers}, proc=${proc}, msgId=${callMsgId}`
-    );
-
-    await this.transport.clientSend(fullCall);
-
-    if (useAsync) {
-      return { _async: true, msgId: callMsgId as string, proc, connectionId: this.getConnectionId() };
-    }
-
-    const response = await this.transport.clientReceive(1024);
-    return this.decodeResponse(response, callMsgId as string);
+  async fire(proc: number, args: Uint8Array = new Uint8Array(0), msgId?: string):
+ Promise<AsyncRpcHandle> {
+    return this.call(proc, args, { async: true, msgId });
   }
 
-  async fire(proc: number, args: Uint8Array = new Uint8Array(0), msgId?: string): Promise<AsyncRpcHandle> {
-    return this.call(proc, args, { async: true, msgId }) as Promise<AsyncRpcHandle>;
-  }
-
-  async getResponse(msgId: string, timeout: number = 5000): Promise<RpcCallResult> {
-    if (this.pendingResponses.has(msgId)) {
-      const responseBuffer = this.pendingResponses.get(msgId)!;
-      this.pendingResponses.delete(msgId);
-      return this.decodeResponse(new Uint8Array(responseBuffer), msgId);
+  /**
+   * Wait for the reply to an earlier fire() / async call.
+   */
+  async getResponse(msgId: string, timeout: number = 5000): Promise<RpcCallResult
+> {
+    if (!this.isConnected()) {
+      throw new Error('Client is not connected. Call connect() first.');
     }
-
-    const response = await this.transport.clientReceive(2048);
-    
-    this.pendingResponses.set(msgId, Buffer.from(response));
-    return this.decodeResponse(response, msgId);
+    const reply = await this.readReply(msgId, timeout);
+    return this.decodeResult(reply, msgId);
   }
 
-  async collectResponses(timeout: number = 1000): Promise<Map<string, RpcCallResult>> {
+  /**
+   * Drain every reply that arrives until `timeout` elapses.
+   * Returns a map keyed by msgId.
+   */
+  async collectResponses(timeout = 1000): Promise<Map<string, RpcCallResult>> {
+    if (!this.isConnected()) {
+      throw new Error('Client is not connected. Call connect() first.');
+    }
+    const connectionId = this.requireConnection();
     const results = new Map<string, RpcCallResult>();
 
-    // Check cached responses
-    for (const [msgId, responseBuffer] of this.pendingResponses) {
-      results.set(msgId, this.decodeResponse(new Uint8Array(responseBuffer), msgId));
-      this.pendingResponses.delete(msgId);
+    for (const [msgId, replay] of this.replyCache) {
+      results.set(msgId, this.decodeResult(replay, msgId));
     }
+    this.replyCache.clear();
 
-    // Poll transport for new responses
     const deadline = Date.now() + timeout;
-    let consecutiveDuplicates = 0;
-
-    while (Date.now() < deadline && consecutiveDuplicates < 2) {
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      let message: Uint8Array;
       try {
-        const response = await this.transport.clientReceive(2048);
-        const result = this.decodeResponse(response);
-        if (result.msgId) {
-          if (results.has(result.msgId)) {
-            consecutiveDuplicates++;
-          } else {
-            results.set(result.msgId, result);
-            consecutiveDuplicates = 0;
-          }
-        }
-      } catch (err: any) {
-        if (err.message?.includes('timeout')) {
-          break;
-        }
+        message = await this.transport.receive(connectionId, remaining);
+      } catch {
+        break; // timeout, or the connection went away — drain ended
       }
-      await new Promise(r => setTimeout(r, 10));
+      const msgId = parseMessage(message).msgId ?? this.generateMsgId();
+      results.set(msgId, this.decodeResult(message, msgId));
     }
 
     return results;
   }
 
-  private encodeOpaqueArgs(data: Uint8Array): Uint8Array {
-    const paddedLength = data.length > 0 ? Math.ceil(data.length / 4) * 4 : 0;
-    const buffer = new Uint8Array(paddedLength + 4);
-    const view = new DataView(buffer.buffer, 0, 4);
-    view.setUint32(0, data.length, false);
-    if (paddedLength > 0) {
-      buffer.subarray(4, 4 + paddedLength).set(data);
+  // ----- internals -----
+
+  private requireConnection(): string {
+    if (this.connectionId === undefined) {
+      throw new Error('Client is not connected. Call connect() first.');
     }
-    return buffer.subarray(0, paddedLength + 4);
+    return this.connectionId;
   }
 
-  private decodeResponse(response: Uint8Array, expectedMsgId?: string): RpcCallResult {
-    if (response.length < 16) {
-      throw new Error(`Response too short: ${response.length} bytes`);
-    }
-
-    const header = decode(response.subarray(0, 16));
-
-    let offset = 48;
-    let responseMsgId: string | undefined;
-    if (response.length >= offset + 4) {
-      const msgIdLen = new DataView(response.buffer, response.byteOffset + offset, 4).getUint32(0, false);
-      if (msgIdLen > 0) {
-        const msgIdPadded = Math.ceil(msgIdLen / 4) * 4;
-        const msgIdTotal = 4 + msgIdPadded;
-        responseMsgId = new TextDecoder().decode(response.subarray(offset + 4, offset + 4 + msgIdLen)).split('\0')[0];
-        offset += msgIdTotal;
+  private async readReply(expectedMsgId: string, timeoutMs: number): Promise<Uint8Array> {
+    const connectionId = this.requireConnection();
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const cached = this.replyCache.get(expectedMsgId);
+      if (cached !== undefined) {
+        this.replyCache.delete(expectedMsgId);
+        return cached;
       }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for reply to ${expectedMsgId}`);
+      }
+      const message = await this.transport.receive(connectionId, remaining);
+      const msgId = parseMessage(message).msgId;
+      if (msgId === expectedMsgId) return message;
+      if (msgId !== undefined) this.replyCache.set(msgId, message); // out of order — stash it
     }
+  }
 
-    let resultValue: Uint8Array | undefined;
-    if (response.length >= offset + 4) {
-      const resultLen = new DataView(response.buffer, response.byteOffset + offset, 4).getUint32(0, false);
-      resultValue = response.subarray(offset + 4, offset + 4 + resultLen);
-    }
+  private decodeResult(reply: Uint8Array, expectedMsgId: string): RpcCallResult {
 
-    console.log(
-      `[RPC Client] Received reply: type=${header.type}, status=${header.authType}${responseMsgId ? `, msgId=${responseMsgId}` : ''}`
-    );
-
+    const parsed = parseMessage(reply);
+    const accepted = parsed.type === RpcConstants.CallTypes.RPC_REPLY;
     return {
-      status: header.type === RpcConstants.CallTypes.RPC_REPLY ? RpcConstants.ReplyStates.RPC_ACCEPTED : header.authType,
-      value: resultValue,
-      msgId: responseMsgId!
+      status: accepted ? parsed.status : RpcConstants.ReplyStates.RPC_GARBAGE,
+      value: parsed.body,
+      msgId: parsed.msgId ?? expectedMsgId,
     };
   }
 
   private generateMsgId(): string {
     return crypto.randomUUID().split('-')[0]!;
   }
-
-  getTransport(): TcpTransport {
-    return this.transport;
-  }
-
-  isConnected(): boolean {
-    return this.connected;
-  }
 }
 
+/**
+ * Convenience: connect a fully configured client over TCP.
+ */
 export async function createTcpClient(
   prognum: number,
   vers: number,
   host: string = '127.0.0.1',
-  port: number = 5000
+  port: number = 5000,
 ): Promise<RpcClient> {
-  const transport = new TcpTransport(host, port, false);
+  const transport = new TcpTransport({ host, port, isServer: false });
   const client = new RpcClient(prognum, vers, { transport });
   await client.connect();
   return client;
 }
+

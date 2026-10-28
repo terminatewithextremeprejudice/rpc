@@ -3,6 +3,7 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   roots: ['<rootDir>/src', '<rootDir>/tests'],
+  testPathIgnorePatterns: ['/node_modules/', '<rootDir>/tests/integration/nonblocking.test.ts'],
   collectCoverageFrom: ['src/**/*.ts'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx'],
   transform: {

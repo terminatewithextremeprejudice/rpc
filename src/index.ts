@@ -22,26 +22,37 @@ export {
   type XDRHeader
 } from './shared/xdr.ts';
 
-export { 
+export {
   Transport,
-  TcpTransport
+  TcpTransport,
+  Connection,
+  LengthPrefixedFramer,
+  XdrFramer,
+  type MessageFramer,
+  type TransportEventMap,
+  type TcpTransportOptions,
 } from './transport.ts';
 
-export { 
-  RpcClient,
-  createTcpClient
-} from './client.ts';
-
-export type {
-  RpcCallResult
-} from './client.ts';
-
-export { 
-  RpcServer,
-  startRpcServer
-} from './server.ts';
-
-export type {
-  RpcHandler,
-  RpcServerOptions
-} from './server.ts';
+// Client and server are slated for a rewrite on top of the new transport
+// API (they reference the old positional TcpTransport constructor and
+// helper methods that no longer exist). Re-enable these exports once they
+// compile against the new interface.
+//
+// export {
+//   RpcClient,
+//   createTcpClient
+// } from './client.ts';
+//
+// export type {
+//   RpcCallResult
+// } from './client.ts';
+//
+// export {
+//   RpcServer,
+//   startRpcServer
+// } from './server.ts';
+//
+// export type {
+//   RpcHandler,
+//   RpcServerOptions
+// } from './server.ts';
