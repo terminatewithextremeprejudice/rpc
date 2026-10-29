@@ -8,7 +8,6 @@ function getPort(): number {
   return nextPort++;
 }
 
-/*
 describe('Non-blocking TCP RPC Integration', () => {
   let server: RpcServer;
   let client: RpcClient;
@@ -128,7 +127,6 @@ describe('Non-blocking TCP RPC Integration', () => {
     }
   });
   });
-*/
 
 describe('Non-blocking TCP with concurrent clients', () => {
   let server: RpcServer;
@@ -140,7 +138,6 @@ describe('Non-blocking TCP with concurrent clients', () => {
     server = new RpcServer({ transport });
     server.register(1, 2, (args: Uint8Array) => args);
     await server.start(false);
-    console.log("server running");
   });
 
   afterEach(async () => {
@@ -153,18 +150,13 @@ describe('Non-blocking TCP with concurrent clients', () => {
     const client1 = await createTcpClient(100003, 2, '127.0.0.1', port);
     const client2 = await createTcpClient(100003, 2, '127.0.0.1', port);
     
-    console.log("clients created");
     // Client1 fires first
     const c1_msg1 = await client1.fire(1, new TextEncoder().encode('client1-msg'));
-    console.log("first msg fired");
     // Client2 fires second (interleaved in server's receive buffer)
     const c2_msg1 = await client2.fire(1, new TextEncoder().encode('client2-msg'));
-    console.log("second msg fired");
     // Server receives requests using receiveNext()
     const req1 = await server.receiveNext();
     const req2 = await server.receiveNext();
-    console.log(req1);
-    console.log(req2);
 
     // Verify we received 2 requests from different connections
     expect(req1).toBeDefined();
