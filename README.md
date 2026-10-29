@@ -24,94 +24,129 @@ Client matches: Each response.msgId → original request handle
 ## How to use 
 
 ``` typescript
-  console.log('=== Non-Blocking RPC Demo ===\n');
-
   // Setup server
-  const serverTransport = new TcpTransport('127.0.0.1', 5001, true);
-  const server = new RpcServer({ transport: serverTransport });
-  
-  // Register handlers with varying delays
-  server.register(1, 2, async (args: any) => {
-    await new Promise(r => setTimeout(r, 300)); // Fast
-    console.log('[Handler 1] Processed');
-    return args;
-  });
-  
-  server.register(2, 2, async (args: any) => {
-    await new Promise(r => setTimeout(r, 600)); // Slow
-    console.log('[Handler 2] Processed');
-    return args;
-  });
-  
-  server.running = true;
-  await serverTransport.connect();
-  console.log('Server started and listening\n');
+const serverTransport = new TcpTransport({
+  host: '127.0.0.1',
+  port: 5001,
+  isServer: true
+});
+const server = new RpcServer({ transport: serverTransport });
 
-  // Client will connect and trigger server ready
-  const clientTransport = new TcpTransport('127.0.0.1', 5001, false);
-  const client = new RpcClient(100003, 2, { transport: clientTransport });
-  await client.connect();
-  console.log('Client connected\n');
+// Register handlers
+server.register(1, 2, (args: Uint8Array) => {
+  console.log('[Handler 1]', new TextDecoder().decode(args));
+  return args;
+});
 
-  // === TEST: Process in reverse order ===
-  console.log('Step 1: Client fires 2 requests in order');
-  
-  const h1 = await client.fire(1, new TextEncoder().encode('fast'));   // proc=1, fast
-  await new Promise(r => setTimeout(r, 1100)); // Wait for server to receive first
-  
-  const h2 = await client.fire(2, new TextEncoder().encode('slow'));   // proc=2, slow
-  await new Promise(r => setTimeout(r, 1100)); // Wait for server to receive second
-  
-  console.log(`  Request A: msgId=${h1.msgId} (proc=1, fast)`);
-  console.log(`  Request B: msgId=${h2.msgId} (proc=2, slow)`);
-  console.log(`  Expected: B should finish first due to shorter delay\n`);
+// Start server
+await server.start(false);
+console.log('Server started and listening\n');
 
-  console.log('Step 2: Server receives and queues both requests');
-  await server.queueIncomingRequest();
-  await server.queueIncomingRequest();
-  const stats = server.getStats();
-  console.log(`  Server has ${stats.pendingRequests} pending requests\n`);
+// Setup client
+const clientTransport = new TcpTransport({
+  host: '127.0.0.1',
+  port: 5001,
+  isServer: false
+});
+const client = new RpcClient(100003, 2, { transport: clientTransport });
+await client.connect();
+console.log('Client connected\n');
 
-  console.log('Step 3: Server processes requests in REVERSE order (B then A)');
-  // Process B (slow proc=2) first
-  await server.processQueuedRequest(h2.msgId);
-  await server.sendResponse(h2.msgId);
-  console.log(`  Processed request ${h2.msgId} (proc=2, slow)`);
-  
-  // Process A (fast proc=1) second
-  await server.processQueuedRequest(h1.msgId);
-  await server.sendResponse(h1.msgId);
-  console.log(`  Processed request ${h1.msgId} (proc=1, fast)\n`);
+// Fire requests (fire-and-forget)
+const handle1 = await client.fire(1, new TextEncoder().encode('fast'));
+const handle2 = await client.fire(2, new TextEncoder().encode('slow'));
 
-  const stats2 = server.getStats();
-  console.log(`  Server now has ${stats2.pendingRequests} pending, ${stats2.bufferedResponses} buffered\n`);
+// Server receives requests into queue
+await server.receiveNext();
+await server.receiveNext();
 
-  console.log('Step 4: Client collects responses');
-  const responses = await client.collectResponses(2000);
-  console.log(`  Client received ${responses.size} responses:`);
-  
-  for (const [msgId, result] of responses) {
-    const decoded = new TextDecoder().decode(result.value || new Uint8Array(0));
-    console.log(`    msgId=${msgId}: "${decoded}" ✓`);
-  }
-  
-  // Verify correctness
-  console.log('\nVerification:');
-  const respForH1 = responses.get(h1.msgId);
-  const respForH2 = responses.get(h2.msgId);
-  
-  if (respForH1 && respForH1.status === 0) {
-    console.log(`  ✓ Response for '${h1.msgId}' arrived correctly`);
-  }
-  if (respForH2 && respForH2.status === 0) {
-    console.log(`  ✓ Response for '${h2.msgId}' arrived correctly`);
-  }
+const stats = server.getStats();
+console.log(`Server has ${stats.pendingRequests} pending requests\n`);
 
-  console.log('\n=== SUCCESS ===');
+// Server processes all and flushes responses
+await server.flushResponses();
+console.log('Server flushed all responses\n');
 
-  await client.disconnect();
-  await server.stop();
+// Client collects all pending responses
+const responses = await client.collectResponses(2000);
+console.log(`Client received ${responses.size} responses:`);
+console.log('Responses correctly matched by msgId\n');
+console.log('=== SUCCESS ===');
 
+await client.disconnect();
+await server.stop();
+
+```
+
+## API Reference
+
+### Server
+```typescript
+const server = new RpcServer({ transport });
+
+// Register a handler
+server.register(procedure: number, version: number, handler: (args: Uint8Array) => unknown)
+
+// Start server (false = don't auto-receive)
+await server.start(waitForConnection: boolean)
+
+// Receive next request from queue
+const request = await server.receiveNext()
+
+// Flush all buffered responses
+await server.flushResponses()
+
+// Stop server
+await server.stop()
+
+// Check if running
+server.isRunning()
+
+// Get stats
+const stats = server.getStats()  // { pendingRequests, bufferedResponses }
+```
+
+### Client
+```typescript
+const client = new RpcClient(prognum: number, version: number, {
+  transport,
+  timeout?: number
+});
+
+// Or use convenience function
+const client = await createTcpClient(prognum, vers, 'host', port)
+
+// Connect
+await client.connect()
+
+// Fire-and-forget request (returns AsyncRpcHandle)
+const handle = await client.fire(procedure: number, args: Uint8Array)
+
+// Synchronous call (waits for reply)
+const result = await client.call(procedure: number, args: Uint8Array)
+
+// Get specific reply by msgId
+const reply = await client.getReply(msgId: string)
+
+// Collect all pending replies
+const replies = await client.collectResponses(timeout: number)
+
+// Disconnect
+await client.disconnect()
+```
+
+### Transport
+```typescript
+// TCP Transport
+const tcp = new TcpTransport({
+  host: '127.0.0.1',
+  port: 5000,
+  isServer: boolean,
+  framer?: MessageFramer  // defaults to XdrFramer
+});
+
+await tcp.connect();  // Start listening or connect to host:port
+await tcp.closeAll(); // Close all connections
 ```
 
 ## Why on earth would anyone use something like this when gRPC exists?
