@@ -2,7 +2,7 @@
 
 A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and binary encoding - simple, direct and brutally basic.
 
-[![CI - Tests & Coverage](https://github.com/terminatewithextremeprejudice/rpc/actions/workflows/ci.yml/badge.svg)](https://github.com/terminatewithextremeprejudice/rpc/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/terminatewithextremeprejudice/rpc/ci.yml?label=CI)]()
 [![Coverage](https://img.shields.io/badge/Coverage-71%25-green)]()
 
 
