@@ -16,7 +16,7 @@ describe('Non-blocking TCP RPC Integration', () => {
 
   beforeEach(async () => {
     port = getPort();
-    const transport = new TcpTransport('127.0.0.1', port, true);
+    const transport = new TcpTransport({host: '127.0.0.1', port: port, isServer: true});
     server = new RpcServer({ transport });
     
     server.register(1, 2, (args: Uint8Array) => args);
@@ -61,7 +61,7 @@ describe('Non-blocking TCP RPC Integration', () => {
     expect(req?.msgId).toEqual(handle.msgId);
     
     // Server flushes all pending requests (sends responses to correct connections)
-    await server.flushRequests();
+    await server.flushResponses();
     
     const result = await client.getResponse(handle.msgId, 2000);
     expect(result.status).toBe(0);
@@ -81,7 +81,7 @@ describe('Non-blocking TCP RPC Integration', () => {
     expect(server.getStats().pendingRequests).toBe(3);
     
     // Server flushes all - responses go to correct connection automatically
-    await server.flushRequests();
+    await server.flushResponses();
     expect(server.getStats().bufferedResponses).toBe(0);
     
     const responses = await client.collectResponses(2000);
@@ -113,7 +113,7 @@ describe('Non-blocking TCP RPC Integration', () => {
     expect(server.getStats().pendingRequests).toBe(5);
     
     // Burst process all at once
-    await server.flushRequests();
+    await server.flushResponses();
     expect(server.getStats().bufferedResponses).toBe(0);
     
     // Client collects all 5 responses
@@ -127,7 +127,7 @@ describe('Non-blocking TCP RPC Integration', () => {
       expect(new TextDecoder().decode(resp?.value!).replace(/\0/g, '')).toBe(req.data);
     }
   });
-});
+  });
 */
 
 describe('Non-blocking TCP with concurrent clients', () => {
@@ -136,7 +136,7 @@ describe('Non-blocking TCP with concurrent clients', () => {
 
   beforeEach(async () => {
     port = getPort();
-    const transport = new TcpTransport('127.0.0.1', port, true);
+    const transport = new TcpTransport({host: '127.0.0.1', port: port, isServer: true});
     server = new RpcServer({ transport });
     server.register(1, 2, (args: Uint8Array) => args);
     await server.start(false);
@@ -172,7 +172,7 @@ describe('Non-blocking TCP with concurrent clients', () => {
     expect(req1!.connectionId).not.toBe(req2!.connectionId);
     
     // Server flushes all - each response goes to correct connection
-    // await server.flushRequests();
+    await server.flushResponses();
     
     // Each client collects its own response
     const c1_result = await client1.getResponse(c1_msg1.msgId!, 2000);
@@ -189,8 +189,7 @@ describe('Non-blocking TCP with concurrent clients', () => {
     await client2.disconnect();
   });
 
-	/*
-  test('multi-client pipelined requests processed out of order', async () => {
+	  test('multi-client pipelined requests processed out of order', async () => {
     const client1 = await createTcpClient(100003, 2, '127.0.0.1', port);
     const client2 = await createTcpClient(100003, 2, '127.0.0.1', port);
     
@@ -210,7 +209,7 @@ describe('Non-blocking TCP with concurrent clients', () => {
     expect(server.getStats().pendingRequests).toBe(4);
     
     // Process and flush - each response automatically routed to correct connection
-    // await server.flushRequests();
+    await server.flushResponses();
     
     // Each client collects their own responses
     const c1_responses = await client1.collectResponses(2000);
@@ -243,6 +242,5 @@ describe('Non-blocking TCP with concurrent clients', () => {
     await client1.disconnect();
     await client2.disconnect();
   });
-	*/
 });
 
