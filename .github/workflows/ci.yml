@@ -1,0 +1,44 @@
+name: CI - Tests & Coverage
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Run Tests with Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ~/dev/nodejs/rpc/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ~/dev/nodejs/rpc
+        run: npm ci
+
+      - name: Build TypeScript
+        working-directory: ~/dev/nodejs/rpc
+        run: npm run build
+
+      - name: Run tests with coverage
+        working-directory: ~/dev/nodejs/rpc
+        run: npm run test -- --coverage --ci
+        env:
+          CI: true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ~/dev/nodejs/rpc/coverage/lcov.info
+          flags: unit

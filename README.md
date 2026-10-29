@@ -1,6 +1,21 @@
-#  RPC in Node.JS (very much still work in progress)
+# RPC in Node.JS (very much still work in progress)
 
 A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and binary encoding - simple, direct and brutally basic.
+
+[![CI - Tests & Coverage](https://github.com/noitakomentaja/rpc-nodejs/actions/workflows/ci.yml/badge.svg)](https://github.com/noitakomentaja/rpc-nodejs/actions)
+[![codecov](https://codecov.io/gh/noitakomentaja/rpc-nodejs/branch/main/graph/badge.svg?token=placeholder)](https://codecov.io/gh/noitakomentaja/rpc-nodejs)
+
+### Quick Start
+```bash
+git clone <your-repo-url>
+cd rpc-nodejs
+npm install
+npm test                    # Run tests
+npm test -- --coverage      # Run with coverage report
+```
+
+### Test Coverage
+Run `npm test -- --coverage` to generate detailed coverage reports in `coverage/lcov-report/index.html`. CI automatically checks on every commit/pull request.
 
 ## How Non-Blocking Works:
 

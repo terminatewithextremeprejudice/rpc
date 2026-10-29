@@ -5,6 +5,7 @@ module.exports = {
   roots: ['<rootDir>/src', '<rootDir>/tests'],
   testPathIgnorePatterns: ['/node_modules/'],
   collectCoverageFrom: ['src/**/*.ts'],
+  coverageReporters: ['text', 'lcov', 'html'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx'],
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
