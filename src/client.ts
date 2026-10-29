@@ -99,7 +99,8 @@ export class RpcClient {
 
   async fire(proc: number, args: Uint8Array = new Uint8Array(0), msgId?: string):
  Promise<AsyncRpcHandle> {
-    return this.call(proc, args, { async: true, msgId });
+    // call() with async: true always resolves to the AsyncRpcHandle branch.
+    return this.call(proc, args, { async: true, msgId }) as Promise<AsyncRpcHandle>;
   }
 
   /**
