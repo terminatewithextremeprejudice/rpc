@@ -78,20 +78,6 @@ const replies = await client.collectResponses(timeout: number)
 await client.disconnect()
 ```
 
-### Transport
-```typescript
-// TCP Transport
-const tcp = new TcpTransport({
-  host: '127.0.0.1',
-  port: 5000,
-  isServer: boolean,
-  framer?: MessageFramer  // defaults to XdrFramer
-});
-
-await tcp.connect();  // Start listening or connect to host:port
-await tcp.closeAll(); // Close all connections
-```
-
 ## How to use 
 
 ``` typescript
