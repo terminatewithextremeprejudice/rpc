@@ -6,7 +6,7 @@
 
 import { RpcConstants } from './shared/xdr';
 import { buildCall, parseMessage } from './shared/message';
-import { Transport, TcpTransport } from './transport';
+import { Transport, TcpTransport, UdpTransport } from './transport';
 
 export interface RpcClientOptions {
   transport: Transport;
@@ -203,6 +203,21 @@ export async function createTcpClient(
   port: number = 5000,
 ): Promise<RpcClient> {
   const transport = new TcpTransport({ host, port, isServer: false });
+  const client = new RpcClient(prognum, vers, { transport });
+  await client.connect();
+  return client;
+}
+
+/**
+ * Convenience: connect a fully configured client over UDP.
+ */
+export async function createUdpClient(
+  prognum: number,
+  vers: number,
+  host: string = '127.0.0.1',
+  port: number = 5000,
+): Promise<RpcClient> {
+  const transport = new UdpTransport({ host, port, isServer: false });
   const client = new RpcClient(prognum, vers, { transport });
   await client.connect();
   return client;

@@ -1,4 +1,5 @@
 // Transport abstraction layer for RPC
+import dgram from 'dgram';
 import net from 'net';
 import { messageSize } from './shared/xdr';
 
@@ -533,5 +534,235 @@ export class TcpTransport extends Transport {
     });
 
     return id;
+  }
+}
+
+export interface UdpTransportOptions {
+  host?: string;
+  port?: number;
+  isServer?: boolean;
+  framer?: MessageFramer;
+}
+
+/**
+ * UDP transport for the generic Transport layer.
+ *
+ * - Server mode (`isServer: true`): `connect()` binds host:port and every
+ *   peer — identified by the datagram's source address + port (its rinfo) —
+ *   becomes its own Connection, mirroring TCP's one-connection-per-socket
+ *   model. The first datagram from a peer registers it; explicit
+ *   close(connectionId) blacklists the peer so its later datagrams are
+ *   dropped.
+ * - Client mode (`isServer: false`): `connect()` binds an ephemeral local
+ *   socket and registers a single default Connection addressed at host:port;
+ *   every datagram received from the peer flows into that one connection.
+ *
+ * Each RPC message travels in one datagram in this library, so the framer
+ * normally sees exactly one complete message per append. The generic
+ * buffer + drain pipeline still reassembles a message that a peer
+ * fragments or coalesces across datagrams.
+ *
+ * One semantic difference from TCP: UDP has no connection-teardown signal
+ * (no FIN), so close events here are app-driven (close / closeAll) rather
+ * than peer-driven like TCP socket hangs.
+ */
+export class UdpTransport extends Transport {
+  private socket: dgram.Socket | null = null;
+  private readonly host: string;
+  private readonly port: number;
+  private readonly isServer: boolean;
+  private active = false;
+
+  // Server mode: rinfo key -> connectionId, plus each connection's reply
+  // address. closedPeers blocks re-registration of explicitly closed peers.
+  private readonly peerByRinfo = new Map<string, string>();
+  private readonly rinfoByPeer = new Map<string, dgram.RemoteInfo>();
+  private readonly closedPeers = new Set<string>();
+
+  private closePromise: Promise<void> | null = null;
+
+  constructor(options: UdpTransportOptions = {}) {
+    // XDR messages are self-delimiting, so they frame datagrams exactly —
+    // same default as the TCP transport.
+    super(options.framer ?? new XdrFramer());
+    this.host = options.host ?? '127.0.0.1';
+    this.port = options.port ?? 5000;
+    this.isServer = options.isServer ?? false;
+  }
+
+  get hostname(): string { return this.host; }
+  get portNumber(): number { return this.port; }
+  get actualPort(): number {
+    const socket = this.socket;
+    if (!socket) return this.port;
+    try { return socket.address().port; } catch { return this.port; }
+  }
+
+  private get family(): 'udp4' | 'udp6' {
+    return this.host.includes(':') ? 'udp6' : 'udp4';
+  }
+
+  // ----- channel operations (abstract Transport API) -----
+  override connect(): Promise<void> {
+    if (this.active) return Promise.resolve();
+    const settled = new Promise<void>((resolve, reject) => {
+      const socket = dgram.createSocket(this.family);
+      let done = false;
+      socket.on('error', (err: Error) => {
+        if (!done) {
+          done = true;
+          this.socket = null;
+          try { socket.close(); } catch { /* already closing */ }
+          reject(err);
+        } else {
+          // Transport-level error after bind.
+          const ids = this.connectionIds();
+          this.emitError(this.isServer ? '' : (ids[0] ?? ''), err);
+        }
+      });
+      socket.once('close', () => {
+        // Socket gone: tear down every connection wired to it.
+        for (const id of [...this.connectionIds()]) {
+          this.unregisterConnection(id, 'connection closed');
+        }
+      });
+      this.socket = socket;
+      socket.bind(this.isServer ? this.port : 0, this.isServer ? this.host : undefined, () => {
+        if (this.isServer) {
+          this.wireServerMessages(socket);
+        } else {
+          // Register the default connection before wiring so a datagram
+          // can never race ahead of it.
+          this.wireClientMessages(socket, this.registerConnection(socket).id);
+        }
+        if (!done) { done = true; resolve(); }
+      });
+    });
+    return settled.then(() => { this.active = true; });
+  }
+
+  override send(connectionId: string, data: Uint8Array): Promise<void> {
+    const conn = this.connection(connectionId);
+    if (!conn || conn.isClosed) {
+      return Promise.reject(new Error(`Cannot send: no active connection ${connectionId}`));
+    }
+    const socket = this.socket;
+    if (!socket) return Promise.reject(new Error('Cannot send: socket is closed'));
+    let address: string;
+    let port: number;
+    if (this.isServer) {
+      const rinfo = this.rinfoByPeer.get(connectionId);
+      if (!rinfo) return Promise.reject(new Error(`Cannot send: unknown peer for ${connectionId}`));
+      address = rinfo.address;
+      port = rinfo.port;
+    } else {
+      address = this.host;
+      port = this.port;
+    }
+    // Resolving means the OS accepted the datagram — UDP has no delivery
+    // ack, so that is the strongest flush signal available.
+    return new Promise<void>((resolve, reject) => {
+      let done = false;
+      const finish = (err?: Error) => {
+        if (done) return;
+        done = true;
+        socket.removeListener('error', onError);
+        if (err) reject(err); else resolve();
+      };
+      // A failing socket reports the error on the socket, not (always) in
+      // the callback — listen for both so this never hangs.
+      const onError = (err: Error) => finish(err);
+      socket.once('error', onError);
+      try {
+        socket.send(data, port, address, (err) => finish(err ?? undefined));
+      } catch (err) {
+        finish(err as Error);
+      }
+    });
+  }
+
+  override close(connectionId: string): Promise<void> {
+    const conn = this.connection(connectionId);
+    if (!conn || conn.isClosed) return Promise.resolve(); // idempotent
+    if (this.isServer) {
+      this.forgetPeer(connectionId);
+      this.unregisterConnection(connectionId, 'connection closed');
+      return Promise.resolve();
+    }
+    // Client mode: the one connection is the socket itself — closing it
+    // closes the connection.
+    return this.closeSocket();
+  }
+
+  override closeAll(): Promise<void> {
+    return this.closeSocket().then(() => { this.active = false; });
+  }
+
+  // ----- internals -----
+  private wireServerMessages(socket: dgram.Socket): void {
+    socket.on('message', (msg: Buffer, rinfo: dgram.RemoteInfo) => {
+      const key = this.rinfoKey(rinfo);
+      if (this.closedPeers.has(key)) return; // peer was explicitly closed
+      let connectionId = this.peerByRinfo.get(key);
+      if (connectionId === undefined) {
+        const conn = this.registerConnection(socket);
+        connectionId = conn.id;
+        this.peerByRinfo.set(key, connectionId);
+        this.rinfoByPeer.set(connectionId, rinfo);
+      }
+      const conn = this.connection(connectionId);
+      if (!conn || conn.isClosed) return;
+      try {
+        // First datagram from a peer: append also registers it (done above);
+        // every later datagram reuses the same connection's buffer.
+        const drained = conn.append(msg);
+        if (drained > 0) this.emitMessage(connectionId);
+      } catch {
+        // Connection closed between lookup and append — drop the datagram.
+      }
+    });
+  }
+
+  private wireClientMessages(socket: dgram.Socket, connectionId: string): void {
+    socket.on('message', (msg: Buffer) => {
+      const conn = this.connection(connectionId);
+      if (!conn || conn.isClosed) return;
+      const drained = conn.append(msg);
+      if (drained > 0) this.emitMessage(connectionId);
+    });
+  }
+
+  private forgetPeer(connectionId: string): void {
+    const rinfo = this.rinfoByPeer.get(connectionId);
+    if (!rinfo) return;
+    const key = this.rinfoKey(rinfo);
+    this.closedPeers.add(key);
+    this.peerByRinfo.delete(key);
+    this.rinfoByPeer.delete(connectionId);
+  }
+
+  private rinfoKey(rinfo: dgram.RemoteInfo): string {
+    return `${rinfo.address}:${rinfo.port}`;
+  }
+
+  private closeSocket(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    const socket = this.socket;
+    this.socket = null;
+    this.active = false;
+    if (!socket) return Promise.resolve();
+    this.closePromise = new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      socket.once('close', finish);
+      const safety = setTimeout(finish, 1000);
+      safety.unref?.();
+      try {
+        socket.close();
+      } catch {
+        finish();
+      }
+    });
+    return this.closePromise;
   }
 }

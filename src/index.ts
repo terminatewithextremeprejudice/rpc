@@ -25,34 +25,28 @@ export {
 export {
   Transport,
   TcpTransport,
+  UdpTransport,
   Connection,
   LengthPrefixedFramer,
   XdrFramer,
   type MessageFramer,
   type TransportEventMap,
   type TcpTransportOptions,
+  type UdpTransportOptions,
 } from './transport.ts';
 
-// Client and server are slated for a rewrite on top of the new transport
-// API (they reference the old positional TcpTransport constructor and
-// helper methods that no longer exist). Re-enable these exports once they
-// compile against the new interface.
-//
-// export {
-//   RpcClient,
-//   createTcpClient
-// } from './client.ts';
-//
-// export type {
-//   RpcCallResult
-// } from './client.ts';
-//
-// export {
-//   RpcServer,
-//   startRpcServer
-// } from './server.ts';
-//
-// export type {
-//   RpcHandler,
-//   RpcServerOptions
-// } from './server.ts';
+// Client and server compile cleanly against the generic Transport API
+// (previously disabled pending that rewrite — now done).
+export {
+  RpcClient,
+  createTcpClient,
+  createUdpClient,
+  type RpcCallResult,
+} from './client.ts';
+
+export {
+  RpcServer,
+  startRpcServer,
+  type RpcHandler,
+  type RpcServerOptions,
+} from './server.ts';
