@@ -1,4 +1,4 @@
-# RPC in Node.JS (very much still work in progress)
+# RPC in Node.JS
 
 A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and binary encoding - simple, direct and brutally basic.
 
@@ -20,63 +20,6 @@ Server flushes responses: Response B → Response C → Response A
 
 Client receives: All responses arrive with msgId tags
 Client matches: Each response.msgId → original request handle
-
-## How to use 
-
-``` typescript
-  // Setup server
-const serverTransport = new TcpTransport({
-  host: '127.0.0.1',
-  port: 5001,
-  isServer: true
-});
-const server = new RpcServer({ transport: serverTransport });
-
-// Register handlers
-server.register(1, 2, (args: Uint8Array) => {
-  console.log('[Handler 1]', new TextDecoder().decode(args));
-  return args;
-});
-
-// Start server
-await server.start(false);
-console.log('Server started and listening\n');
-
-// Setup client
-const clientTransport = new TcpTransport({
-  host: '127.0.0.1',
-  port: 5001,
-  isServer: false
-});
-const client = new RpcClient(100003, 2, { transport: clientTransport });
-await client.connect();
-console.log('Client connected\n');
-
-// Fire requests (fire-and-forget)
-const handle1 = await client.fire(1, new TextEncoder().encode('fast'));
-const handle2 = await client.fire(2, new TextEncoder().encode('slow'));
-
-// Server receives requests into queue
-await server.receiveNext();
-await server.receiveNext();
-
-const stats = server.getStats();
-console.log(`Server has ${stats.pendingRequests} pending requests\n`);
-
-// Server processes all and flushes responses
-await server.flushResponses();
-console.log('Server flushed all responses\n');
-
-// Client collects all pending responses
-const responses = await client.collectResponses(2000);
-console.log(`Client received ${responses.size} responses:`);
-console.log('Responses correctly matched by msgId\n');
-console.log('=== SUCCESS ===');
-
-await client.disconnect();
-await server.stop();
-
-```
 
 ## API Reference
 
@@ -135,18 +78,54 @@ const replies = await client.collectResponses(timeout: number)
 await client.disconnect()
 ```
 
-### Transport
-```typescript
-// TCP Transport
-const tcp = new TcpTransport({
+## How to use 
+
+``` typescript
+  // Setup server
+const serverTransport = new TcpTransport({
   host: '127.0.0.1',
-  port: 5000,
-  isServer: boolean,
-  framer?: MessageFramer  // defaults to XdrFramer
+  port: 5001,
+  isServer: true
+});
+const server = new RpcServer({ transport: serverTransport });
+
+// Register handlers
+server.register(1, 2, (args: Uint8Array) => {
+  console.log('[Handler 1]', new TextDecoder().decode(args));
+  return args;
 });
 
-await tcp.connect();  // Start listening or connect to host:port
-await tcp.closeAll(); // Close all connections
+// Start server
+await server.start(false);
+console.log('Server started and listening\n');
+
+// Setup client
+const clientTransport = new TcpTransport({
+  host: '127.0.0.1',
+  port: 5001,
+  isServer: false
+});
+const client = new RpcClient(100003, 2, { transport: clientTransport });
+await client.connect();
+console.log('Client connected\n');
+
+// Fire requests (fire-and-forget)
+const handle1 = await client.fire(1, new TextEncoder().encode('fast'));
+
+// Server receives requests into queue
+await server.receiveNext();
+
+// Server processes all and flushes responses
+await server.flushResponses();
+console.log('Server flushed all responses\n');
+
+// Client collects all pending responses
+const responses = await client.collectResponses(2000);
+console.log(`Client received ${responses.size} responses:`);
+
+await client.disconnect();
+await server.stop();
+
 ```
 
 ## Why on earth would anyone use something like this when gRPC exists?
