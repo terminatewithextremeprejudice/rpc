@@ -3,7 +3,7 @@
 A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and binary encoding - simple, direct and brutally basic.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/terminatewithextremeprejudice/rpc/ci.yml?label=CI)]()
-[![Coverage](https://img.shields.io/badge/Coverage-71%25-green)]()
+[![Coverage](https://img.shields.io/badge/Coverage-72%25-green)]()
 
 
 ## How Non-Blocking Works:
