@@ -5,6 +5,21 @@ A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and b
 [![CI](https://img.shields.io/github/actions/workflow/status/terminatewithextremeprejudice/rpc/ci.yml?label=CI)]()
 [![Coverage](https://img.shields.io/badge/Coverage-72%25-green)]()
 
+## Why on earth would anyone use something like this when gRPC exists?
+
+** Simplicity is sometimes a virtue worth paying for. **
+
+- Lower overhead - no protobufs, multiplexing, streaming, auth and a million knobs. 
+- Original RPC works over any transport layers (TCP, UDP, shared memory, Unix pipes etc.) unlike gRPC which is heavily paired with HTTP/2.
+- Control & Customization - You can always modify a simple RPC library to your needs.
+- Zero Dependencies - this library is literally just RPC runtime + XDR encoder. 
+- No HTTP Assumptions - request/response framing, headers etc.
+
+## Currently supported transport layers
+- [X] TCP
+- [X] UDP
+- [ ] Websockets
+- [ ] Unix Pipes
 
 ## How Non-Blocking Works:
 
@@ -127,15 +142,4 @@ await client.disconnect();
 await server.stop();
 
 ```
-
-## Why on earth would anyone use something like this when gRPC exists?
-
-** Simplicity is sometimes a virtue worth paying for. **
-
-- Lower overhead - no protobufs, multiplexing, streaming, auth and a million knobs. 
-- Original RPC works over any transport layers (TCP, UDP, shared memory, Unix pipes etc.) unlike gRPC which is heavily paired with HTTP/2.
-- Control & Customization - You can always modify a simple RPC library to your needs.
-- Zero Dependencies - this library is literally just RPC runtime + XDR encoder. 
-- No HTTP Assumptions - request/response framing, headers etc.
-
 
