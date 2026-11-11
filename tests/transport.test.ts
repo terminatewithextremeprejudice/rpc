@@ -43,6 +43,23 @@ function extractBody(message: Uint8Array): Uint8Array {
   return decodeOpaque(message.subarray(MESSAGE_START + 4 + msgIdLen));
 }
 
+const ENCODE = new TextEncoder();
+let nextPort = 6800;
+const getPort = (): number => nextPort++;
+
+async function tcpPair(): Promise<{ server: TcpTransport; client: TcpTransport }>
+ {
+  const server = new TcpTransport({ host: '127.0.0.1', port: 0, isServer: true });
+
+  await server.connect();
+  const client = new TcpTransport({ host: '127.0.0.1', port: server.actualPort });
+
+  await client.connect();
+  await sleep(50);
+  return { server, client };
+}
+
+
 async function startServer(): Promise<TcpTransport> {
   const transport = new TcpTransport({ host: '127.0.0.1', port: 0, isServer: true });
   await transport.connect();
@@ -96,6 +113,20 @@ async function waitForPeers(server: UdpTransport, count: number, timeoutMs: numb
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe('transport getters', () => {
+  test('expose host/port info', async () => {
+    const t = new TcpTransport({ host: '127.0.0.1', port: 61234 });
+    expect(t.hostname).toBe('127.0.0.1');
+    expect(t.portNumber).toBe(61234);
+    const u = new UdpTransport({ host: '127.0.0.1', port: 61235 });
+    expect(u.hostname).toBe('127.0.0.1');
+    expect(u.portNumber).toBe(61235);
+    await u.connect();
+    expect(u.actualPort).toBeGreaterThan(0);
+    await u.closeAll();
+  });
+});
 
 describe('TcpTransport', () => {
   test('routes messages between two concurrent clients', async () => {
@@ -357,5 +388,174 @@ describe('UdpTransport', () => {
       await client.closeAll();
       await server.closeAll();
     }
+  });
+
+  test('client-side close(cid) closes the whole socket', async () => {
+    const server = new UdpTransport({ host: '127.0.0.1', port: getPort(), isServer : true });
+    await server.connect();
+    const client = new UdpTransport({ host: '127.0.0.1', port: server.actualPort });
+
+    await client.connect();
+    const cid = onlyConnection(client);
+    await client.close(cid);
+    expect(client.isConnected(cid)).toBe(false);
+    await expect(client.send(cid, new Uint8Array(8))).rejects.toThrow(/Cannot send/);
+    await server.closeAll();
+  });
+});
+
+
+describe('send guards', () => {
+  test('rejects an unknown connection id', async () => {
+    const { server, client } = await tcpPair();
+    await expect(server.send('ghost', new Uint8Array(8))).rejects.toThrow(/Cannot send/);
+    await client.closeAll(); await server.closeAll();
+  });
+
+  test('rejects a connection whose socket is already destroyed', () => {
+    const t = new TcpTransport({ host: '127.0.0.1', port: 1, isServer: false });
+    const conn = t.registerConnection({ destroyed: true } as object);
+    return expect(t.send(conn.id, new Uint8Array(8))).rejects.toThrow(/has been closed/);
+  });
+
+  test('rejects a reply to a peer with no recorded rinfo (UDP)', async () => {
+    const server = new UdpTransport({ host: '127.0.0.1', port: getPort(), isServer
+: true });
+    await server.connect();
+    const conn = server.registerConnection((server as any).socket);
+    await expect(server.send(conn.id, new Uint8Array(8))).rejects.toThrow(/unknown peer/);
+    await server.closeAll();
+  });
+});
+
+describe('connect failures', () => {
+  test('a second TCP server on the same port rejects', async () => {
+    const port = getPort();
+    const s1 = new TcpTransport({ host: '127.0.0.1', port, isServer: true });
+    await s1.connect();
+    const s2 = new TcpTransport({ host: '127.0.0.1', port, isServer: true });
+    await expect(s2.connect()).rejects.toThrow();
+    await s1.closeAll();
+    await s2.closeAll().catch(() => undefined);
+  });
+
+  test('a second UDP server on the same port rejects', async () => {
+    const port = getPort();
+    const s1 = new UdpTransport({ host: '127.0.0.1', port, isServer: true });
+    await s1.connect();
+    const s2 = new UdpTransport({ host: '127.0.0.1', port, isServer: true });
+    await expect(s2.connect()).rejects.toThrow();
+    await s1.closeAll();
+    await s2.closeAll().catch(() => undefined);
+  });
+
+  test('a TCP client to a dead port rejects', async () => {
+    const freePort = (): Promise<number> => new Promise((resolve) => {
+      const srv = net.createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const p = (srv.address() as net.AddressInfo).port;
+        srv.close(() => resolve(p));
+      });
+    });
+    const port = await freePort();
+    const t = new TcpTransport({ host: '127.0.0.1', port });
+    await expect(t.connect()).rejects.toThrow();
+    await t.closeAll().catch(() => undefined);
+  });
+});
+
+describe('Transport event bus', () => {
+  test('once fires exactly once, off removes, clear resets', async () => {
+    const { server, client } = await tcpPair();
+    try {
+      let onceCount = 0;
+      const onceListener = () => onceCount++;
+      server.once('close', onceListener);
+
+      let offCount = 0;
+      const offListener = () => offCount++;
+      server.on('close', offListener);
+      server.off('close', offListener);
+
+      await client.closeAll();
+      // Wait for the close event
+      const deadline = Date.now() + 2000;
+      while (onceCount === 0 && Date.now() < deadline) await sleep(10);
+      expect(onceCount).toBe(1);
+      expect(offCount).toBe(0);
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('socket errors after bind are re-emitted on the transport bus', async () => {
+    const { server, client } = await tcpPair();
+    try {
+      const errors: string[] = [];
+      server.on('error', (_connectionId: string, err: Error) => errors.push(err.message
+));
+      const sid = onlyConnection(server);
+      const socket = server.connection(sid)!.channel as net.Socket;
+      socket.emit('error', new Error('boom'));
+      await sleep(30);
+      expect(errors).toEqual(['boom']);
+    } finally {
+      await client.closeAll();
+      await server.closeAll();
+    }
+  });
+
+  test('emitter.clear wipes listeners (whitebox)', async () => {
+    const { server } = await tcpPair();
+    (server as any).events.clear();
+    expect((server as any).events.listeners.size).toBe(0);
+    await server.closeAll();
+  });
+});
+
+describe('waitForData', () => {
+  test('resolves true when a message arrives (pending path)', async () => {
+    const { server, client } = await tcpPair();
+    try {
+      const p = server.waitForData(3000);
+      await sleep(30);
+      await client.send(onlyConnection(client), callMessage('w', ENCODE.encode('x')));
+      expect(await p).toBe(true);
+    } finally { await client.closeAll(); await server.closeAll(); }
+  });
+
+  test('resolves true immediately when a message is already queued', async () => {
+
+    const { server, client } = await tcpPair();
+    try {
+      const cidc = onlyConnection(client);
+      await client.send(cidc, callMessage('w', ENCODE.encode('x')));
+      const deadline = Date.now() + 2000;
+      const sid = onlyConnection(server);
+      while (!server.hasCompleteMessage(sid) && Date.now() < deadline) await sleep(10);
+      expect(await server.waitForData(200, [sid])).toBe(true);
+    } finally { await client.closeAll(); await server.closeAll(); }
+  });
+
+  test('resolves false on timeout', async () => {
+    const { server, client } = await tcpPair();
+    expect(await server.waitForData(200)).toBe(false);
+    await client.closeAll(); await server.closeAll();
+  });
+
+  test('resolves false when the connection drops', async () => {
+    const { server, client } = await tcpPair();
+    const p = server.waitForData(2000);
+    await sleep(30);
+    await client.closeAll();
+    expect(await p).toBe(false);
+    await server.closeAll();
+  });
+
+  test('waitForConnection times out when no client shows up', async () => {
+    const server = new TcpTransport({ host: '127.0.0.1', port: getPort(), isServer: true });
+    await server.connect();
+    await expect(server.waitForConnection(300)).rejects.toThrow(/Timed out/);
+    await server.closeAll();
   });
 });
