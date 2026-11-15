@@ -1,6 +1,8 @@
 // Transport abstraction layer for RPC
 import dgram from 'dgram';
 import net from 'net';
+import WebSocket, { WebSocketServer } from 'ws';
+import type { RawData } from 'ws';
 import { messageSize } from './shared/xdr';
 
 // Generic transport layer for RPC.
@@ -764,5 +766,273 @@ export class UdpTransport extends Transport {
       }
     });
     return this.closePromise;
+  }
+}
+
+export interface WsTransportOptions {
+  host?: string;
+  port?: number;
+  // URL path the server serves and the client dials (default '/').
+  path?: string;
+  isServer?: boolean;
+  framer?: MessageFramer;
+  // Cap on the size (in bytes) of any single WebSocket frame.
+  maxPayload?: number;
+}
+
+/**
+ * WebSocket transport for the generic Transport layer.
+ *
+ * - Server mode (`isServer: true`): `connect()` starts a WebSocketServer on
+ *   host:port, and every accepted socket becomes its own Connection — the
+ *   same one-connection-per-socket model as TCP, so many concurrent clients
+ *   are handled at once.
+ * - Client mode (`isServer: false`): `connect()` opens a single WebSocket to
+ *   ws://host:port/path and registers it as a Connection.
+ *
+ * The RPC wire format is binary, so payloads always travel as binary frames
+ * and a text frame is treated as a protocol error. Byte buffering, message
+ * framing (Connection.append/drain), the event bus, and receive queueing are
+ * all inherited from the base Transport — this class merely wires `ws`
+ * sockets into them, and reassembles a message whether the peer sends it as
+ * one frame or several.
+ */
+export class WsTransport extends Transport {
+  private wss: WebSocketServer | null = null;
+  private clientSocket: WebSocket | null = null;
+  private readonly host: string;
+  private readonly port: number;
+  private readonly path: string;
+  private readonly isServer: boolean;
+  private readonly maxPayload: number | undefined;
+  private active = false;
+  private startPromise: Promise<void> | null = null;
+
+  constructor(options: WsTransportOptions = {}) {
+    // Same default framing as the other transports: XDR messages are
+    // self-delimiting. Pass another MessageFramer for other protocols.
+    super(options.framer ?? new XdrFramer());
+    this.host = options.host ?? '127.0.0.1';
+    this.port = options.port ?? 5000;
+    this.path = options.path ?? '/';
+    this.isServer = options.isServer ?? false;
+    this.maxPayload = options.maxPayload;
+  }
+
+  get hostname(): string { return this.host; }
+  get portNumber(): number { return this.port; }
+  get actualPort(): number {
+    try {
+      const addr = this.wss?.address();
+      return addr !== null && typeof addr === 'object' ? addr.port : this.port;
+    } catch {
+      return this.port; // not listening (yet or any more)
+    }
+  }
+
+  // ----- channel operations (abstract Transport API) -----
+  override connect(): Promise<void> {
+    if (this.active) return Promise.resolve();
+    // Cache the start attempt so concurrent connect() calls can't
+    // double-bind the port or open duplicate sockets.
+    if (this.startPromise === null) {
+      this.startPromise = (this.isServer ? this.startServer() : this.connectClient())
+        .then(() => { this.active = true; })
+        .catch((err) => { this.startPromise = null; throw err; });
+    }
+    return this.startPromise;
+  }
+
+  override send(connectionId: string, data: Uint8Array): Promise<void> {
+    const conn = this.connection(connectionId);
+    if (!conn || conn.isClosed) {
+      return Promise.reject(new Error(`Cannot send: no active connection ${connectionId}`));
+    }
+    const socket = conn.channel as WebSocket;
+    if (socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(`Cannot send: WebSocket ${connectionId} is not open`));
+    }
+    // Binary frame (ws's default for non-string data): the XDR payload is
+    // opaque bytes. Resolving means the socket accepted the frame, so a
+    // stalled peer applies backpressure — same philosophy as TCP.
+    return new Promise<void>((resolve, reject) => {
+      socket.send(data, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  override close(connectionId: string): Promise<void> {
+    const conn = this.connection(connectionId);
+    if (!conn) return Promise.resolve(); // idempotent
+    const socket = conn.channel as WebSocket | null;
+    if (!socket || socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+    // Graceful close handshake: let the peer close, but don't wait forever.
+    return new Promise<void>((resolve) => {
+      const bail = setTimeout(() => socket.terminate(), 1000);
+      bail.unref?.();
+      socket.once('close', () => {
+        clearTimeout(bail);
+        resolve();
+      });
+      socket.close();
+    });
+  }
+
+  override closeAll(): Promise<void> {
+    const closes = this.connectionIds().map((id) => {
+      // Never fail because one connection is already gone.
+      return this.close(id).catch(() => undefined);
+    });
+    return Promise.all([...closes, this.stopServer()]).then(() => {
+      this.active = false;
+    });
+  }
+
+  // ----- internals -----
+  private startServer(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const wss = new WebSocketServer({
+        host: this.host,
+        port: this.port,
+        ...(this.path !== '/' ? { path: this.path } : {}),
+        ...(this.maxPayload !== undefined ? { maxPayload: this.maxPayload } : {}),
+      });
+      this.wss = wss;
+
+      wss.on('connection', (socket: WebSocket) => this.wireSocket(socket));
+
+      wss.on('error', (err: Error) => {
+        if (!settled) {
+          settled = true;
+          this.wss = null;
+          reject(err);
+        } else {
+          // Transport-level error after bind: report on the event bus
+          // (connectionId '' = not tied to a specific connection).
+          this.emitError('', err);
+        }
+      });
+
+      wss.once('close', () => {
+        // Server socket gone: tear down any connections still wired to it.
+        for (const id of [...this.connectionIds()]) {
+          this.unregisterConnection(id, 'connection closed');
+        }
+      });
+
+      wss.once('listening', () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      });
+    });
+  }
+
+  private stopServer(): Promise<void> {
+    const wss = this.wss;
+    this.wss = null;
+    if (!wss) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const bail = setTimeout(resolve, 1000);
+      bail.unref?.();
+      wss.close(() => {
+        clearTimeout(bail);
+        resolve();
+      });
+    });
+  }
+
+  private connectClient(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // Bracket IPv6 literals in the URL; net-style host strings don't need it.
+      const host = this.host.includes(':') ? `[${this.host}]` : this.host;
+      const path = this.path === '/' ? '' : this.path;
+      const url = `ws://${host}:${this.port}${path}`;
+      const socket = new WebSocket(
+        url,
+        this.maxPayload !== undefined ? { maxPayload: this.maxPayload } : undefined,
+      );
+      let settled = false;
+      const cleanup = () => {
+        socket.removeListener('open', onOpen);
+        socket.removeListener('error', onError);
+        socket.removeListener('unexpected-response', onUnexpectedResponse);
+        socket.removeListener('close', onClose);
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        // terminate() aborts the in-flight handshake, so the underlying
+        // request can still emit a late 'error' after cleanup() removed its
+        // listener. An 'error' event with no listener throws as an uncaught
+        // exception, so keep a swallowing listener alive for that window.
+        socket.once('error', () => undefined);
+        socket.terminate();
+        reject(err);
+      };
+      const onOpen = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.clientSocket = socket;
+        this.wireSocket(socket);
+        resolve();
+      };
+      const onError = (err: Error) => fail(err);
+      const onUnexpectedResponse = () =>
+        fail(new Error(`WebSocket handshake with ${url} rejected by the server`));
+      const onClose = () =>
+        fail(new Error(`Connection to ${url} dropped before it was established`));
+
+      socket.once('open', onOpen);
+      socket.once('error', onError);
+      socket.once('unexpected-response', onUnexpectedResponse);
+      socket.once('close', onClose);
+    });
+  }
+
+  // Register a live WebSocket as a Connection and route its raw ws events
+  // into the Transport's event bus. Returns the connection ID.
+  private wireSocket(socket: WebSocket): string {
+    const conn = this.registerConnection(socket);
+    const id = conn.id;
+
+    socket.on('message', (data: RawData, isBinary: boolean) => {
+      if (conn.isClosed) return;
+      if (!isBinary) {
+        // The RPC wire format is binary — a text frame is a protocol error,
+        // not bytes to buffer.
+        this.emitError(id, new Error(`Non-binary WebSocket frame received on ${id}`));
+        socket.terminate();
+        return;
+      }
+      // RawData may be a Buffer, an ArrayBuffer, or an array of buffers;
+      // normalize to one contiguous chunk before framing.
+      const chunk = Buffer.isBuffer(data)
+        ? data
+        : Array.isArray(data)
+          ? Buffer.concat(data)
+          : Buffer.from(data, 0, data.byteLength);
+      let drained = 0;
+      try {
+        drained = conn.append(chunk);
+      } catch {
+        return; // connection closed between the check and the append
+      }
+      if (drained > 0) this.emitMessage(id);
+    });
+
+    socket.on('error', (err: Error) => {
+      this.emitError(id, err);
+    });
+
+    socket.once('close', () => {
+      if (this.clientSocket === socket) this.clientSocket = null;
+      this.unregisterConnection(id, 'connection closed');
+    });
+
+    return id;
   }
 }

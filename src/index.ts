@@ -26,6 +26,7 @@ export {
   Transport,
   TcpTransport,
   UdpTransport,
+  WsTransport,
   Connection,
   LengthPrefixedFramer,
   XdrFramer,
@@ -33,6 +34,7 @@ export {
   type TransportEventMap,
   type TcpTransportOptions,
   type UdpTransportOptions,
+  type WsTransportOptions,
 } from './transport.ts';
 
 // Client and server compile cleanly against the generic Transport API
@@ -41,12 +43,14 @@ export {
   RpcClient,
   createTcpClient,
   createUdpClient,
+  createWsClient,
   type RpcCallResult,
 } from './client.ts';
 
 export {
   RpcServer,
   startRpcServer,
+  startWsRpcServer,
   type RpcHandler,
   type RpcServerOptions,
 } from './server.ts';

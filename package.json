@@ -11,12 +11,17 @@
     "lint": "eslint src/**/*.ts",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["rpc", "nodejs", "typescript"],
+  "keywords": [
+    "rpc",
+    "nodejs",
+    "typescript"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.19",
+    "@types/ws": "^8.18.2",
     "@typescript-eslint/eslint-plugin": "^6.19.1",
     "@typescript-eslint/parser": "^6.19.1",
     "eslint": "^8.56.0",
@@ -24,5 +29,8 @@
     "ts-jest": "^29.1.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
   }
 }

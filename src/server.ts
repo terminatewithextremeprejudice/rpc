@@ -7,7 +7,7 @@
 
 import { RpcConstants } from './shared/xdr';
 import { buildReply, parseMessage } from './shared/message';
-import { Transport, TcpTransport } from './transport';
+import { Transport, TcpTransport, WsTransport } from './transport';
 
 export interface RpcHandler {
   procedure: number;
@@ -248,6 +248,19 @@ export async function startRpcServer(
   port: number = 5000,
 ): Promise<RpcServer> {
   const transport = new TcpTransport({ host, port, isServer: true });
+  const server = new RpcServer({ transport });
+  await server.start();
+  return server;
+}
+
+/**
+ * Convenience: start a WebSocket-based RPC server.
+ */
+export async function startWsRpcServer(
+  host: string = '127.0.0.1',
+  port: number = 5000,
+): Promise<RpcServer> {
+  const transport = new WsTransport({ host, port, isServer: true });
   const server = new RpcServer({ transport });
   await server.start();
   return server;

@@ -3,7 +3,7 @@
 A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and binary encoding - simple, direct and brutally basic.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/terminatewithextremeprejudice/rpc/ci.yml?label=CI)]()
-[![Coverage](https://img.shields.io/badge/Coverage-92%25-brightgreen)]()
+[![Coverage](https://img.shields.io/badge/Coverage-88%25-brightgreen)]()
 
 ## Why on earth would anyone use something like this when gRPC exists?
 
@@ -18,7 +18,7 @@ A simple Remote Procedure Call (RPC) implementation using Node.js, sockets and b
 ## Currently supported transport layers
 - [X] TCP
 - [X] UDP
-- [ ] Websockets
+- [x] Websockets
 - [ ] Unix Pipes
 
 ## How Non-Blocking Works:

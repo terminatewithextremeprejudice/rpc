@@ -1,7 +1,9 @@
 import { describe, expect, test } from '@jest/globals';
 import dgram from 'dgram';
+import http from 'http';
 import net from 'net';
-import { TcpTransport, Transport, UdpTransport } from '../src/transport';
+import WebSocket from 'ws';
+import { TcpTransport, Transport, UdpTransport, WsTransport, type WsTransportOptions } from '../src/transport';
 import { concat, decodeOpaque, encode, encodeCall, encodeString, encodeOpaque } from '../src/shared/xdr';
 
 const TEXT = new TextDecoder();
@@ -103,6 +105,28 @@ async function startUdpClient(port: number): Promise<UdpTransport> {
   const transport = new UdpTransport({ host: '127.0.0.1', port });
   await transport.connect();
   return transport;
+}
+
+async function startWsServer(options: WsTransportOptions = {}): Promise<WsTransport> {
+  const transport = new WsTransport({ host: '127.0.0.1', port: 0, isServer: true, ...options });
+  await transport.connect();
+  return transport;
+}
+
+async function startWsClient(port: number, options: WsTransportOptions = {}): Promise<WsTransport> {
+  const transport = new WsTransport({ host: '127.0.0.1', port, ...options });
+  await transport.connect();
+  return transport;
+}
+
+// A bare `ws` client socket for frame-level cases WsTransport cannot
+// express (split frames, text frames, oversized frames).
+function rawWebSocket(port: number, path = '/'): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+    socket.once('open', () => resolve(socket));
+    socket.once('error', (err) => reject(err));
+  });
 }
 
 // Wait until the server has opened that many peer connections (first
@@ -405,6 +429,225 @@ describe('UdpTransport', () => {
 });
 
 
+describe('WsTransport', () => {
+  test('expose host/port info', async () => {
+    const t = new WsTransport({ host: '127.0.0.1', port: 61236, path: '/rpc' });
+    expect(t.hostname).toBe('127.0.0.1');
+    expect(t.portNumber).toBe(61236);
+    const server = await startWsServer();
+    expect(server.actualPort).toBeGreaterThan(0);
+    await server.closeAll();
+  });
+
+  test('routes messages between two concurrent clients', async () => {
+    const server = await startWsServer();
+    try {
+      const c1 = await startWsClient(server.actualPort);
+      const c2 = await startWsClient(server.actualPort);
+      await server.waitForConnection(3000);
+      expect(server.connectionCount()).toBe(2);
+
+      const cid1 = onlyConnection(c1);
+      const cid2 = onlyConnection(c2);
+
+      await c1.send(cid1, callMessage('msg-c1', BINARY.encode('hello-c1')));
+      await c2.send(cid2, callMessage('msg-c2', BINARY.encode('hello-c2')));
+
+      const r1 = await server.receiveAny(3000);
+      const r2 = await server.receiveAny(3000);
+      expect(r1).toBeDefined();
+      expect(r2).toBeDefined();
+
+      const incoming = new Map<string, { connectionId: string; message: Uint8Array }>();
+      for (const r of [r1, r2]) {
+        if (r) incoming.set(extractMsgId(r.message), r);
+      }
+      expect(incoming.has('msg-c1')).toBe(true);
+      expect(incoming.has('msg-c2')).toBe(true);
+
+      // Reply to each message on its own connection.
+      for (const [msgId, r] of incoming) {
+        await server.send(r.connectionId, replyMessage(msgId, BINARY.encode(`echo-${msgId}`)));
+      }
+
+      const p1 = await c1.receive(cid1, 3000);
+      const p2 = await c2.receive(cid2, 3000);
+      expect(extractMsgId(p1)).toBe('msg-c1');
+      expect(extractMsgId(p2)).toBe('msg-c2');
+      expect(TEXT.decode(extractBody(p1))).toBe('echo-msg-c1');
+      expect(TEXT.decode(extractBody(p2))).toBe('echo-msg-c2');
+
+      await c1.closeAll();
+      await c2.closeAll();
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('reassembles a message split across two binary frames', async () => {
+    const server = await startWsServer();
+    try {
+      const raw = await rawWebSocket(server.actualPort);
+
+      const full = callMessage('split-msg', BINARY.encode('split-across-frames'));
+      const splitAt = Math.floor(full.length / 3);
+      raw.send(Buffer.from(full.subarray(0, splitAt)));
+      await sleep(120);
+      raw.send(Buffer.from(full.subarray(splitAt)));
+
+      const sid = await server.waitForConnection(3000);
+      const received = await server.receive(sid, 3000);
+      expect(received.length).toBe(full.length);
+      expect(extractMsgId(received)).toBe('split-msg');
+      expect(TEXT.decode(extractBody(received))).toBe('split-across-frames');
+
+      raw.terminate();
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('splits two messages that arrive in a single frame', async () => {
+    const server = await startWsServer();
+    try {
+      const raw = await rawWebSocket(server.actualPort);
+
+      const m1 = callMessage('combo-a', BINARY.encode('first'));
+      const m2 = callMessage('combo-b', BINARY.encode('second'));
+      raw.send(Buffer.concat([Buffer.from(m1), Buffer.from(m2)]));
+
+      const sid = await server.waitForConnection(3000);
+      const first = await server.receive(sid, 3000);
+      const second = await server.receive(sid, 3000);
+      expect(extractMsgId(first)).toBe('combo-a');
+      expect(extractMsgId(second)).toBe('combo-b');
+      expect(TEXT.decode(extractBody(first))).toBe('first');
+      expect(TEXT.decode(extractBody(second))).toBe('second');
+
+      raw.terminate();
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('treats a text frame as a protocol error and drops the connection', async () => {
+    const server = await startWsServer();
+    try {
+      const raw = await rawWebSocket(server.actualPort);
+      const sid = await server.waitForConnection(3000);
+
+      const errors: string[] = [];
+      const closes: string[] = [];
+      const onError = (_id: string, err: Error) => errors.push(err.message);
+      const onClose = (id: string) => closes.push(id);
+      server.on('error', onError);
+      server.on('close', onClose);
+
+      // A string send is a text frame — the wire format is binary.
+      raw.send('definitely not a binary frame');
+
+      const deadline = Date.now() + 3000;
+      while (closes.length === 0 && Date.now() < deadline) await sleep(25);
+
+      expect(errors.some((m) => /non-binary/i.test(m))).toBe(true);
+      expect(closes).toContain(sid);
+      expect(server.connection(sid)).toBeUndefined();
+      expect(server.isConnected(sid)).toBe(false);
+      server.off('error', onError);
+      server.off('close', onClose);
+      raw.terminate();
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('drops a peer whose frame exceeds maxPayload', async () => {
+    const server = new WsTransport({ host: '127.0.0.1', port: 0, isServer: true, maxPayload: 512 });
+    await server.connect();
+    try {
+      const raw = await rawWebSocket(server.actualPort);
+      const sid = await server.waitForConnection(3000);
+
+      const errors: string[] = [];
+      const closes: string[] = [];
+      const onError = (_id: string, err: Error) => errors.push(err.message);
+      const onClose = (id: string) => closes.push(id);
+      server.on('error', onError);
+      server.on('close', onClose);
+
+      raw.send(Buffer.alloc(1024, 1)); // 1024B frame into a 512B limit
+
+      const deadline = Date.now() + 3000;
+      while (errors.length === 0 && closes.length === 0 && Date.now() < deadline) await sleep(25);
+
+      expect(errors.some((m) => /max payload/i.test(m))).toBe(true);
+      expect(closes).toContain(sid);
+      server.off('error', onError);
+      server.off('close', onClose);
+      raw.terminate();
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('serves only the path it was configured with', async () => {
+    const server = await startWsServer({ path: '/rpc' });
+    try {
+      const good = await startWsClient(server.actualPort, { path: '/rpc' });
+      await server.waitForConnection(3000);
+      expect(server.connectionCount()).toBe(1);
+      await good.closeAll();
+
+      // A client that dials the default path gets a rejected handshake.
+      const straggler = new WsTransport({ host: '127.0.0.1', port: server.actualPort });
+      await expect(straggler.connect()).rejects.toThrow(/handshake/i);
+      await straggler.closeAll().catch(() => undefined);
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('close fires the event and rejects receive when the client goes away', async () => {
+    const server = await startWsServer();
+    try {
+      const client = await startWsClient(server.actualPort);
+      const sid = await server.waitForConnection(3000);
+
+      const closes: string[] = [];
+      const onClose = (id: string) => closes.push(id);
+      server.on('close', onClose);
+
+      await client.closeAll();
+
+      const deadline = Date.now() + 3000;
+      while (closes.length === 0 && Date.now() < deadline) await sleep(25);
+      expect(closes).toEqual(expect.arrayContaining([sid]));
+      expect(server.isConnected(sid)).toBe(false);
+
+      await expect(server.receive(sid, 300)).rejects.toThrow();
+      server.off('close', onClose);
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('receive rejects for an unknown connection id', async () => {
+    const server = await startWsServer();
+    try {
+      await expect(server.receive('ghost', 200)).rejects.toThrow(/No active connection/);
+    } finally {
+      await server.closeAll();
+    }
+  });
+
+  test('concurrent connect() calls share one startup', async () => {
+    const server = new WsTransport({ host: '127.0.0.1', port: getPort(), isServer: true });
+    await Promise.all([server.connect(), server.connect(), server.connect()]);
+    expect((server as any).active).toBe(true);
+    await server.closeAll();
+  });
+});
+
 describe('send guards', () => {
   test('rejects an unknown connection id', async () => {
     const { server, client } = await tcpPair();
@@ -425,6 +668,16 @@ describe('send guards', () => {
     const conn = server.registerConnection((server as any).socket);
     await expect(server.send(conn.id, new Uint8Array(8))).rejects.toThrow(/unknown peer/);
     await server.closeAll();
+  });
+
+  test('rejects a send on a WebSocket that is not open', async () => {
+    const t = new WsTransport({ host: '127.0.0.1', port: getPort() });
+    // A socket that never reaches OPEN (nothing listens on this port).
+    const socket = new WebSocket(`ws://127.0.0.1:${getPort()}`);
+    socket.once('error', () => undefined);
+    const conn = t.registerConnection(socket);
+    await expect(t.send(conn.id, new Uint8Array(8))).rejects.toThrow(/not open/);
+    socket.terminate();
   });
 });
 
@@ -461,6 +714,46 @@ describe('connect failures', () => {
     const t = new TcpTransport({ host: '127.0.0.1', port });
     await expect(t.connect()).rejects.toThrow();
     await t.closeAll().catch(() => undefined);
+  });
+
+  test('a second WS server on the same port rejects', async () => {
+    const port = getPort();
+    const s1 = new WsTransport({ host: '127.0.0.1', port, isServer: true });
+    await s1.connect();
+    const s2 = new WsTransport({ host: '127.0.0.1', port, isServer: true });
+    await expect(s2.connect()).rejects.toThrow();
+    await s1.closeAll();
+    await s2.closeAll().catch(() => undefined);
+  });
+
+  test('a WS client to a dead port rejects', async () => {
+    const freePort = (): Promise<number> => new Promise((resolve) => {
+      const srv = net.createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const p = (srv.address() as net.AddressInfo).port;
+        srv.close(() => resolve(p));
+      });
+    });
+    const port = await freePort();
+    const t = new WsTransport({ host: '127.0.0.1', port });
+    await expect(t.connect()).rejects.toThrow();
+    await t.closeAll().catch(() => undefined);
+  });
+
+  test('a WS client against a plain HTTP server fails the handshake', async () => {
+    const httpServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('not a websocket endpoint');
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+    const port = (httpServer.address() as net.AddressInfo).port;
+    try {
+      const t = new WsTransport({ host: '127.0.0.1', port });
+      await expect(t.connect()).rejects.toThrow(/handshake/i);
+      await t.closeAll().catch(() => undefined);
+    } finally {
+      httpServer.close();
+    }
   });
 });
 
